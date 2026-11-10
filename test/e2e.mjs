@@ -164,6 +164,16 @@ let wr = await fetch(B + '/orders/new', form([['customer', 'Web'], ['due_date', 
 assert.equal(wr.status, 302); r = await call('list_orders', { customer: 'Web' }); assert.equal(r.j[0].total, 840); ok('web order form: empty price is filled from the catalogue');
 wr = await fetch(B + '/orders/new', form([['customer', 'Web2'], ['due_date', '2027-04-20'], ['iname', 'Plum cake'], ['iqty', '1'], ['iprice', '']], A.cookie));
 assert.equal(wr.status, 400); assert.match(await wr.text(), /&quot;Plum cake&quot; is not in your products/); ok('web order form: unknown item without price shows the plain error');
+const csv = 'name,price\n"Scone, plain",60\nScone,70\n,10\nRusk,abc\nCupcakes,"₹95"\nCupcakes,99\n';
+let pv = await (await fetch(B + '/products/import/preview', form({ csv }, A.cookie))).text();
+assert.ok(pv.includes('Line 4') && pv.includes('No name in this row.') && pv.includes('Price &quot;abc&quot; for &quot;Rusk&quot; is not a number.') && pv.includes('already on line 6') && pv.includes('Save 3 products')); ok('CSV preview: quoted names and ₹ prices parse, bad rows explained in plain English, nothing saved yet');
+r = await call('list_products', {}); assert.ok(!r.j.some(p => p.name === 'Scone')); ok('preview saves nothing');
+wr = await fetch(B + '/products/import', form({ csv }, A.cookie)); assert.match(decodeURIComponent(wr.headers.get('location')), /2 added, 1 unchanged/);
+r = await call('list_products', {}); assert.equal(r.j.find(p => p.name === 'Scone, plain').price, 60); ok('CSV save adds the good rows only');
+const sconeId = (await (await fetch(B + '/products', { headers: { cookie: A.cookie } })).text()).match(/value="Scone" aria-label="Name of Scone" data-save="\/products\/(\d+)\/field"/)[1];
+wr = await fetch(B + `/products/${sconeId}/field`, form({ field: 'price', value: '65' }, A.cookie)); assert.equal(wr.status, 200);
+wr = await fetch(B + `/products/${sconeId}/field`, form({ field: 'name', value: 'cupcakes' }, A.cookie)); assert.equal(wr.status, 400); assert.match((await wr.json()).error, /already a product called "Cupcakes"/);
+r = await call('list_products', {}); assert.equal(r.j.find(p => p.name === 'Scone').price, 65); ok('web click-to-edit: price saved, clashing rename refused in plain English');
 r = await call('profit_summary', { month: '2027-04' }); const apr = n => r.j.margin_by_item.find(i => i.item === n);
 assert.equal(apr('Banana bread').cost, 'cost unknown'); assert.equal(apr('Banana bread').why, 'no recipe for this product'); assert.equal(apr('Gift card').why, 'not in the product catalogue');
 assert.equal(apr('Cupcakes').cost, 128); ok('costing goes through product_id: cupcakes costed (8 × ₹16), banana bread has no recipe, gift card is not a product');

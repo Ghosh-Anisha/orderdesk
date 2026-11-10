@@ -38,8 +38,13 @@ async function loadUser(req) {
 const authed = h(async (req, res, next) => {
   req.user = await loadUser(req);
   if (!req.user) return res.redirect('/login');
+  req.user.tabs = navTabs(req.user);
   next();
 });
+// nav shows only what this person may use
+const navTabs = u => [['/', 'Today', 'today'], ['/orders', 'Orders', 'orders'], ['/products', 'Products', 'products'],
+  ...(can(u, 'save_recipe') ? [['/recipes', 'Recipes', 'recipes']] : can(u, 'make_list') ? [['/make', 'Make list', 'recipes']] : []),
+  ...(can(u, 'profit_summary') ? [['/money', 'Money', 'money']] : []), ['/settings', 'Settings', 'settings']];
 // same permission names as the Claude tools, so the web app and Claude agree on who can do what
 const allow = tool => (req, res, next) => can(req.user, tool) ? next()
   : res.status(403).send(page('Not allowed', `<div class="sec empty"><h1>You can't do this</h1><p>Your email is not allowed to "${toolLabel(tool)}" for ${esc(req.user.biz_name)}. Ask the owner to allow it in Settings → Team.</p><div class="btns"><a class="btn" href="/">Go to Today</a></div></div>`, { user: req.user }));
@@ -107,10 +112,12 @@ app.get('/', authed, h(async (req, res) => {
 }));
 
 // ---- orders
-const itemRows = items => (items.length ? items : [{ name: '', qty: 1, unit_paise: null }]).map(i => `<tr><td class="c-item"><input name="iname" value="${esc(i.name)}" placeholder="e.g. Brownie box of 6" aria-label="Item"></td>
+const itemRows = items => (items.length ? items : [{ name: '', qty: 1, unit_paise: null }]).map(i => `<tr><td class="c-item"><input name="iname" value="${esc(i.name)}" placeholder="Start typing a product" aria-label="Item" list="catalogue" autocomplete="off"></td>
 <td class="c-qty"><input name="iqty" type="number" inputmode="decimal" step="any" min="0" value="${i.qty}" aria-label="Quantity"></td><td class="c-price"><input name="iprice" type="number" inputmode="decimal" step="any" min="0" value="${i.name && i.unit_paise != null ? i.unit_paise / 100 : ''}" placeholder="from products" aria-label="Price each in rupees"></td></tr>`).join('');
-const itemsTable = items => `<table id="items" class="itable"><thead><tr><th>Item</th><th>Qty</th><th>Price each (₹)</th></tr></thead><tbody>${itemRows(items)}</tbody></table>
-<div class="btns" style="margin-top:10px"><button type="button" class="ghost small" data-additem>${icon('plus')}Add item</button><span class="muted">To remove an item, clear its name.</span></div>`;
+const itemsTable = (items, catalogue = []) => { const live = catalogue.filter(p => p.active && p.price_paise !== null);
+  return `<table id="items" class="itable" data-prices="${esc(JSON.stringify(Object.fromEntries(live.map(p => [p.name.toLowerCase(), p.price_paise / 100]))))}"><thead><tr><th>Item</th><th>Qty</th><th>Price each (₹)</th></tr></thead><tbody>${itemRows(items)}</tbody></table>
+<datalist id="catalogue">${live.map(p => `<option value="${esc(p.name)}">${inr(p.price_paise)}</option>`).join('')}</datalist>
+<div class="btns" style="margin-top:10px"><button type="button" class="ghost small" data-additem>${icon('plus')}Add item</button><span class="muted">${live.length ? 'Pick a product and its price fills in; you can still change it for this order. Leave a price empty to use the product price.' : 'Add products on the Products page and their prices fill in here.'} To remove an item, clear its name.</span></div>`; };
 const readItems = b => {
   const arr = v => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
   const n = arr(b.iname), qy = arr(b.iqty), p = arr(b.iprice);
@@ -139,14 +146,14 @@ app.get('/orders', authed, h(async (req, res) => {
   res.send(page('Orders', body, { user: req.user, nav: 'orders' }));
 }));
 
-const newOrderForm = (v = {}) => `<a class="back" href="/orders">${icon('back')}Orders</a><div class="head"><h1>New order</h1></div><form method="post" action="/orders/new" class="sec">
+const newOrderForm = (v = {}, catalogue = []) => `<a class="back" href="/orders">${icon('back')}Orders</a><div class="head"><h1>New order</h1></div><form method="post" action="/orders/new" class="sec">
 <div class="grid2"><div><label for="c">Customer</label><input id="c" name="customer" required value="${esc(v.customer)}" autocomplete="off"></div>
 <div><label for="ct">Phone or Instagram <span class="hint">(optional)</span></label><input id="ct" name="contact" value="${esc(v.contact)}" autocomplete="off"></div>
 <div><label for="d">Due date</label><input id="d" type="date" name="due_date" required value="${esc(v.due_date || core.today())}"></div></div>
 <label for="n">Notes <span class="hint">(optional)</span></label><input id="n" name="notes" value="${esc(v.notes)}" placeholder="Eggless, message on cake…">
-<h2 style="margin-top:28px">Items</h2>${itemsTable(v.items?.length ? v.items.map(i => ({ ...i, unit_paise: i.unit_price === '' || i.unit_price == null ? null : core.toPaise(i.unit_price) })) : [])}
+<h2 style="margin-top:28px">Items</h2>${itemsTable(v.items?.length ? v.items.map(i => ({ ...i, unit_paise: i.unit_price === '' || i.unit_price == null ? null : core.toPaise(i.unit_price) })) : [], catalogue)}
 <div class="formfoot"><button>Save order</button><a class="btn ghost" href="/orders">Cancel</a></div></form>`;
-app.get('/orders/new', authed, allow('add_order'), (req, res) => res.send(page('New order', newOrderForm(), { user: req.user, nav: 'orders' })));
+app.get('/orders/new', authed, allow('add_order'), h(async (req, res) => res.send(page('New order', newOrderForm({}, await core.listProducts(req.user.bid)), { user: req.user, nav: 'orders' }))));
 app.post('/orders/new', authed, allow('add_order'), h(async (req, res) => {
   const b = req.body, items = readItems(b);
   try {
@@ -154,7 +161,7 @@ app.post('/orders/new', authed, allow('add_order'), h(async (req, res) => {
     res.redirect(`/orders/${r.number}`);
   } catch (e) {
     if (!(e instanceof core.UserError)) throw e;
-    res.status(400).send(page('New order', newOrderForm({ ...b, items }), { user: req.user, nav: 'orders', flash: { err: e.message } }));
+    res.status(400).send(page('New order', newOrderForm({ ...b, items }, await core.listProducts(req.user.bid)), { user: req.user, nav: 'orders', flash: { err: e.message } }));
   }
 }));
 
@@ -192,7 +199,7 @@ app.get('/orders/:n', authed, h(async (req, res) => {
   <div><label for="f3">Due date</label><input id="f3" type="date" name="due_date" value="${o.due_date}" ${sv}></div>
   <div><label for="f4">Status</label>${stateSelect(o, `id="f4" ${sv}`)}</div></div>
   <label for="f5">Notes</label><input id="f5" name="notes" value="${esc(o.notes)}" ${sv}><p class="muted" style="margin:10px 0 0">${edit ? 'Changes here save by themselves.' : 'Only people allowed to change orders can edit these.'}</p></section>
-  ${edit ? `<form method="post" action="/orders/${o.number}/items" class="sec"><h2>Items</h2>${itemsTable(o.items)}<div class="formfoot"><button>Save items</button><b class="num">Total ${inr(o.total)}</b></div></form>`
+  ${edit ? `<form method="post" action="/orders/${o.number}/items" class="sec"><h2>Items</h2>${itemsTable(o.items, await core.listProducts(req.user.bid))}<div class="formfoot"><button>Save items</button><b class="num">Total ${inr(o.total)}</b></div></form>`
     : `<section class="sec"><h2>Items</h2>${itemsList(o)}</section>`}
   </div><div>
   <section class="sec"><h2>Payments</h2>${o.payments.map(p => `<div class="row"><div><b class="num">${inr(p.amount_paise)}</b> <span class="muted">${when(p.paid_on)}${p.upi_ref ? ' · ref <span class="mono">' + esc(p.upi_ref) + '</span>' : ''}</span>${p.state === 'reported' ? '<div><span class="chip waiting">Customer says paid</span></div>' : ''}</div>
@@ -204,6 +211,63 @@ app.get('/orders/:n', authed, h(async (req, res) => {
   <div class="btns" style="margin-top:12px"><a class="btn small ghost" href="${wa}" target="_blank" rel="noopener">${icon('send')}Send on WhatsApp</a><a class="btn small ghost" href="${esc(link)}" target="_blank" rel="noopener">${icon('open')}Preview</a></div></section>
   </div></div>`;
   res.send(page(`${o.customer} · order #${o.number}`, body, { user: req.user, nav: 'orders', flash: { ok: req.query.ok, err: req.query.err } }));
+}));
+
+// ---- products (catalogue). Same core functions as Claude's save_products.
+const csvForm = (csv = '') => `<form method="post" action="/products/import/preview" class="subform" id="csv"><h3>Upload a price list</h3>
+  <p class="muted">A CSV file from Excel or Google Sheets with a <b>name</b> column and a <b>price</b> column. You will see a preview before anything is saved.</p>
+  <label for="csvf">CSV file</label><input id="csvf" type="file" accept=".csv,text/csv,text/plain" data-csv="csvt">
+  <label for="csvt">Or paste rows <span class="hint">(name, price on each line)</span></label><textarea id="csvt" name="csv" rows="4" placeholder="name,price&#10;Brownie box of 6,620&#10;Banana bread,380">${esc(csv)}</textarea>
+  <button class="small" style="margin-top:12px">Preview</button></form>`;
+const addProductForm = `<form method="post" action="/products/add" class="addrow"><h3>Add a product</h3><div class="grid2"><div><label for="np">Name</label><input id="np" name="name" required placeholder="e.g. Brownie box of 6" autocomplete="off"></div>
+  <div><label for="npp">Price (₹)</label><input id="npp" name="price" type="number" inputmode="decimal" step="any" min="0" required></div></div><button class="small" style="margin-top:12px">${icon('plus')}Add product</button></form>`;
+
+app.get('/products', authed, h(async (req, res) => {
+  const edit = can(req.user, 'save_products'), recipes = can(req.user, 'save_recipe');
+  const ps = await core.listProducts(req.user.bid);
+  const sv = p => edit ? `data-save="/products/${p.id}/field"` : 'disabled';
+  const body = `<div class="head"><div><h1>Products</h1><p class="muted">Your menu and prices. Orders fill in these prices; each order keeps the price it was sold at.</p></div></div>
+  ${ps.length ? `<div class="sec flush"><table class="ptable"><thead><tr><th>Name</th><th class="num">Price (₹)</th><th>On sale</th><th>Cost</th></tr></thead><tbody>
+  ${ps.map(p => `<tr${p.active ? '' : ' class="off"'}><td class="c-name"><input name="name" value="${esc(p.name)}" aria-label="Name of ${esc(p.name)}" ${sv(p)}></td>
+    <td class="c-price"><input name="price" type="number" inputmode="decimal" step="any" min="0" value="${p.price_paise === null ? '' : p.price_paise / 100}" placeholder="no price" aria-label="Price of ${esc(p.name)} in rupees" ${sv(p)}></td>
+    <td class="c-on"><label class="toggle"><input type="checkbox" name="active"${p.active ? ' checked' : ''} ${sv(p)}><span>${p.active ? 'On sale' : 'Off'}</span></label></td>
+    <td class="c-cost">${p.recipe ? `<span class="num">${inr(Math.round(p.recipe.unit_cost))}</span> <span class="muted">a piece</span>` : '<span class="muted">cost unknown</span>'}${recipes ? ` <a href="/recipes/${p.id}">${p.recipe ? 'Recipe' : 'Add recipe'}</a>` : ''}</td></tr>`).join('')}</tbody></table></div>
+  ${edit ? '<p class="muted">Change a name, price or on-sale switch right in the list. It saves by itself.</p>' : ''}`
+    : `<div class="sec empty"><h2>No products yet</h2><p>Add your products here, or tell Claude "here is my menu" and share a price list.</p></div>`}
+  ${edit ? `<section class="sec">${addProductForm}${csvForm()}</section>` : ''}`;
+  res.send(page('Products', body, { user: req.user, nav: 'products', flash: { ok: req.query.ok, err: req.query.err } }));
+}));
+app.post('/products/:id/field', authed, allow('save_products'), h(async (req, res) => {
+  try { await core.updateProduct(req.user.bid, +req.params.id, req.body.field, req.body.value); res.json({ ok: true }); }
+  catch (e) { if (e instanceof core.UserError) return res.status(400).json({ error: e.message }); throw e; }
+}));
+app.post('/products/add', authed, allow('save_products'), h(async (req, res) => {
+  const name = String(req.body.name || '').trim();
+  if (name && (await core.listProducts(req.user.bid)).some(p => p.name.toLowerCase() === name.toLowerCase())) return res.redirect('/products?err=' + encodeURIComponent(`"${name}" is already a product. Change its price in the list instead.`));
+  const r = await core.saveProducts(req.user.bid, [{ name, price: req.body.price }]);
+  if (r.errors.length) return res.redirect('/products?err=' + encodeURIComponent(r.errors[0].problem));
+  res.redirect('/products?ok=' + encodeURIComponent(`Added ${name}.`));
+}));
+// CSV: parse on the server, show what will happen, save only after the second click
+app.post('/products/import/preview', authed, allow('save_products'), h(async (req, res) => {
+  const csv = String(req.body.csv || '');
+  const { rows, errors } = core.parseProductCsv(csv);
+  const have = new Map((await core.listProducts(req.user.bid)).map(p => [p.name.toLowerCase(), p]));
+  const what = r => { const p = have.get(r.name.toLowerCase()); const paise = core.toPaise(r.price);
+    return !p ? '<span class="chip paid">New</span>' : p.price_paise === paise ? '<span class="muted">No change</span>' : `<span class="chip waiting">Price ${p.price_paise === null ? 'none' : inr(p.price_paise)} → ${inr(paise)}</span>`; };
+  const body = `<a class="back" href="/products">${icon('back')}Products</a><div class="head"><div><h1>Check before saving</h1><p class="muted">${rows.length} row${rows.length === 1 ? '' : 's'} ready${errors.length ? `, ${errors.length} with a problem (skipped)` : ''}. Nothing is saved until you press Save.</p></div></div>
+  ${errors.length ? `<section class="sec hot"><h2>Rows with a problem</h2>${errors.map(e => `<div class="row"><div><b>Line ${e.line}</b> <span class="muted">${esc(e.problem)}</span></div></div>`).join('')}<p class="muted" style="margin:8px 0 0">Fix these in your file and preview again, or save the rest now.</p></section>` : ''}
+  ${rows.length ? `<form method="post" action="/products/import" class="sec flush"><input type="hidden" name="csv" value="${esc(csv)}"><table class="preview"><thead><tr><th>Line</th><th>Name</th><th class="num">Price</th><th>What happens</th></tr></thead><tbody>
+    ${rows.map(r => `<tr><td class="muted">${r.line}</td><td>${esc(r.name)}</td><td class="num">${inr(core.toPaise(r.price))}</td><td>${what(r)}</td></tr>`).join('')}</tbody></table>
+    <div class="formfoot" style="padding:16px 8px"><button>Save ${rows.length} product${rows.length === 1 ? '' : 's'}</button><a class="btn ghost" href="/products">Cancel</a></div></form>` : `<div class="sec">${csvForm(csv)}</div>`}`;
+  res.send(page('Check products', body, { user: req.user, nav: 'products' }));
+}));
+app.post('/products/import', authed, allow('save_products'), h(async (req, res) => {
+  const { rows } = core.parseProductCsv(String(req.body.csv || ''));
+  if (!rows.length) return res.redirect('/products?err=' + encodeURIComponent('There were no rows to save. Check the file has a name and a price column.'));
+  const r = await core.saveProducts(req.user.bid, rows.map(x => ({ name: x.name, price: x.price })));
+  const msg = [r.created.length && `${r.created.length} added`, r.updated.length && `${r.updated.length} repriced`, r.unchanged.length && `${r.unchanged.length} unchanged`].filter(Boolean).join(', ');
+  res.redirect(`/products?${r.errors.length ? 'err=' + encodeURIComponent(`${msg}. Not saved: ${r.errors.map(e => e.problem).join(' ')}`) : 'ok=' + encodeURIComponent(msg + '.')}`);
 }));
 
 // ---- settings and team

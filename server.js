@@ -98,10 +98,10 @@ app.get('/', authed, h(async (req, res) => {
 }));
 
 // ---- orders
-const itemRows = items => (items.length ? items : [{ name: '', qty: 1, unit_paise: 0 }]).map(i => `<tr><td><input name="iname" value="${esc(i.name)}" placeholder="Item" aria-label="Item"></td>
-<td style="width:70px"><input name="iqty" type="number" step="any" min="0" value="${i.qty}" aria-label="Quantity"></td><td style="width:110px"><input name="iprice" type="number" step="any" min="0" value="${i.unit_paise ? i.unit_paise / 100 : ''}" placeholder="₹ each" aria-label="Price each"></td></tr>`).join('');
-const itemsTable = items => `<table id="items"><thead><tr><th>Item</th><th>Qty</th><th>Price each</th></tr></thead><tbody>${itemRows(items)}</tbody></table>
-<button type="button" class="ghost small" style="margin-top:8px" data-additem>+ Add item</button>`;
+const itemRows = items => (items.length ? items : [{ name: '', qty: 1, unit_paise: 0 }]).map(i => `<tr><td class="c-item"><input name="iname" value="${esc(i.name)}" placeholder="e.g. Brownie box of 6" aria-label="Item"></td>
+<td class="c-qty"><input name="iqty" type="number" inputmode="decimal" step="any" min="0" value="${i.qty}" aria-label="Quantity"></td><td class="c-price"><input name="iprice" type="number" inputmode="decimal" step="any" min="0" value="${i.unit_paise ? i.unit_paise / 100 : ''}" placeholder="₹ each" aria-label="Price each in rupees"></td></tr>`).join('');
+const itemsTable = items => `<table id="items" class="itable"><thead><tr><th>Item</th><th>Qty</th><th>Price each (₹)</th></tr></thead><tbody>${itemRows(items)}</tbody></table>
+<div class="btns" style="margin-top:10px"><button type="button" class="ghost small" data-additem>${icon('plus')}Add item</button><span class="muted">To remove an item, clear its name.</span></div>`;
 const readItems = b => {
   const arr = v => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
   const n = arr(b.iname), qy = arr(b.iqty), p = arr(b.iprice);
@@ -129,13 +129,13 @@ app.get('/orders', authed, h(async (req, res) => {
   res.send(page('Orders', body, { user: req.user, nav: 'orders' }));
 }));
 
-const newOrderForm = (v = {}, err) => `<h1>New order</h1><form method="post" action="/orders/new" class="sec" style="margin-top:16px">
-<div class="grid2"><div><label for="c">Customer</label><input id="c" name="customer" required value="${esc(v.customer)}"></div>
-<div><label for="ct">Phone or Instagram</label><input id="ct" name="contact" value="${esc(v.contact)}"></div>
-<div><label for="d">Due date</label><input id="d" type="date" name="due_date" required value="${esc(v.due_date || core.today())}"></div>
-<div><label for="n">Notes</label><input id="n" name="notes" value="${esc(v.notes)}" placeholder="Eggless, message on cake…"></div></div>
-<label>Items</label>${itemsTable(v.items?.length ? v.items.map(i => ({ ...i, unit_paise: core.toPaise(i.unit_price || 0) })) : [])}
-<button style="margin-top:18px">Save order</button></form>`;
+const newOrderForm = (v = {}) => `<a class="back" href="/orders">${icon('back')}Orders</a><div class="head"><h1>New order</h1></div><form method="post" action="/orders/new" class="sec">
+<div class="grid2"><div><label for="c">Customer</label><input id="c" name="customer" required value="${esc(v.customer)}" autocomplete="off"></div>
+<div><label for="ct">Phone or Instagram <span class="hint">(optional)</span></label><input id="ct" name="contact" value="${esc(v.contact)}" autocomplete="off"></div>
+<div><label for="d">Due date</label><input id="d" type="date" name="due_date" required value="${esc(v.due_date || core.today())}"></div></div>
+<label for="n">Notes <span class="hint">(optional)</span></label><input id="n" name="notes" value="${esc(v.notes)}" placeholder="Eggless, message on cake…">
+<h2 style="margin-top:28px">Items</h2>${itemsTable(v.items?.length ? v.items.map(i => ({ ...i, unit_paise: core.toPaise(i.unit_price || 0) })) : [])}
+<div class="formfoot"><button>Save order</button><a class="btn ghost" href="/orders">Cancel</a></div></form>`;
 app.get('/orders/new', authed, (req, res) => res.send(page('New order', newOrderForm(), { user: req.user, nav: 'orders' })));
 app.post('/orders/new', authed, h(async (req, res) => {
   const b = req.body, items = readItems(b);
@@ -168,26 +168,30 @@ app.post('/payments/:id/:action(confirm|delete)', authed, h(async (req, res) => 
 }));
 
 app.get('/orders/:n', authed, h(async (req, res) => {
-  let o; try { o = await core.getOrder(req.user.bid, +req.params.n); } catch (e) { if (e instanceof core.UserError) return res.status(404).send(page('Not found', `<div class="sec empty"><h2>${esc(e.message)}</h2><a class="btn" href="/orders">Back to orders</a></div>`, { user: req.user, nav: 'orders' })); throw e; }
+  let o; try { o = await core.getOrder(req.user.bid, +req.params.n); } catch (e) { if (e instanceof core.UserError) return res.status(404).send(page('Not found', `<div class="sec empty"><h2>${esc(e.message)}</h2><p>It may have a different number. Find it in your orders list.</p><div class="btns"><a class="btn" href="/orders">Back to orders</a></div></div>`, { user: req.user, nav: 'orders' })); throw e; }
   const link = `${base(req)}/o/${o.public_token}`;
   const wa = `https://wa.me/?text=${encodeURIComponent(`Hi ${o.customer}, here is your order from ${req.user.biz_name}. You can see the amount and pay here: ${link}`)}`;
   const sv = `data-save="/orders/${o.number}/field"`;
-  const body = `<p><a href="/orders">← Orders</a></p><div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:6px 0 16px"><h1>#${o.number} ${esc(o.customer)}</h1>${chip(o.pay)}</div>
-  <div class="sec"><div class="grid2"><div><label for="f1">Customer</label><input id="f1" name="customer" value="${esc(o.customer)}" ${sv}></div>
+  const body = `<a class="back" href="/orders">${icon('back')}Orders</a>
+  <div class="head"><div><h1>${esc(o.customer)}</h1><p class="muted">Order #${o.number} · due ${when(o.due_date)}</p></div>
+  <div class="bal">${chip(o.pay)}<b class="num">${o.balance ? inr(o.balance) : inr(o.total)}</b><span class="muted">${o.balance ? 'still due' : 'paid in full'}</span></div></div>
+  <div class="split"><div>
+  <section class="sec"><h2>Details</h2><div class="grid2"><div><label for="f1">Customer</label><input id="f1" name="customer" value="${esc(o.customer)}" ${sv}></div>
   <div><label for="f2">Phone or Instagram</label><input id="f2" name="contact" value="${esc(o.contact)}" ${sv}></div>
   <div><label for="f3">Due date</label><input id="f3" type="date" name="due_date" value="${o.due_date}" ${sv}></div>
-  <div><label for="f4">Status</label><select id="f4" name="state" ${sv}>${['open', 'delivered', 'cancelled'].map(s => `<option ${o.state === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div></div>
-  <label for="f5">Notes</label><input id="f5" name="notes" value="${esc(o.notes)}" ${sv}><p class="muted">Changes here save by themselves.</p></div>
-  <form method="post" action="/orders/${o.number}/items" class="sec"><h2>Items</h2>${itemsTable(o.items)}<div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px"><button class="small">Save items</button><b>Total ${inr(o.total)}</b></div></form>
-  <div class="sec"><h2>Payments</h2>${o.payments.map(p => `<div class="row"><div><b>${inr(p.amount_paise)}</b> <span class="muted">${when(p.paid_on)}${p.upi_ref ? ' · ref <span class="mono">' + esc(p.upi_ref) + '</span>' : ''}</span> ${p.state === 'reported' ? '<span class="chip part-paid">Customer says paid</span>' : ''}</div>
-    <form method="post" style="display:flex;gap:8px">${p.state === 'reported' ? `<button class="small" formaction="/payments/${p.id}/confirm">Confirm</button>` : ''}<button class="small ghost" formaction="/payments/${p.id}/delete">Remove</button></form></div>`).join('') || '<p class="muted">No payments yet.</p>'}
-  <p><b>${o.balance ? inr(o.balance) + ' still due' : 'Fully paid'}</b></p>
-  <form method="post" action="/orders/${o.number}/payments"><div class="grid2"><div><label for="pa">Amount received (₹)</label><input id="pa" name="amount" type="number" step="any" min="0" required value="${o.balance ? o.balance / 100 : ''}"></div>
-  <div><label for="pd">Date</label><input id="pd" name="paid_on" type="date" value="${core.today()}"></div></div><label for="pr">UPI reference (optional, stops double counting)</label><input id="pr" name="upi_ref"><button class="small" style="margin-top:14px">Record payment</button></form></div>
-  <div class="sec"><h2>Customer link</h2><p class="muted" style="margin-top:0">They see the amount, your QR and UPI ID, and can tell you when they have paid.</p>
+  <div><label for="f4">Status</label>${stateSelect(o, `id="f4" ${sv}`)}</div></div>
+  <label for="f5">Notes</label><input id="f5" name="notes" value="${esc(o.notes)}" ${sv}><p class="muted" style="margin:10px 0 0">Changes here save by themselves.</p></section>
+  <form method="post" action="/orders/${o.number}/items" class="sec"><h2>Items</h2>${itemsTable(o.items)}<div class="formfoot"><button>Save items</button><b class="num">Total ${inr(o.total)}</b></div></form>
+  </div><div>
+  <section class="sec"><h2>Payments</h2>${o.payments.map(p => `<div class="row"><div><b class="num">${inr(p.amount_paise)}</b> <span class="muted">${when(p.paid_on)}${p.upi_ref ? ' · ref <span class="mono">' + esc(p.upi_ref) + '</span>' : ''}</span>${p.state === 'reported' ? '<div><span class="chip waiting">Customer says paid</span></div>' : ''}</div>
+    <form method="post" class="btns">${p.state === 'reported' ? `<button class="small" formaction="/payments/${p.id}/confirm">${icon('check')}Confirm</button><button class="small ghost" formaction="/payments/${p.id}/delete">Not received</button>` : `<button class="small ghost" formaction="/payments/${p.id}/delete">Remove</button>`}</form></div>`).join('') || '<p class="muted">No payments yet.</p>'}
+  <form method="post" action="/orders/${o.number}/payments" class="subform"><h3>Record a payment</h3><div class="grid2"><div><label for="pa">Amount received (₹)</label><input id="pa" name="amount" type="number" inputmode="decimal" step="any" min="0" required value="${o.balance ? o.balance / 100 : ''}"></div>
+  <div><label for="pd">Date</label><input id="pd" name="paid_on" type="date" value="${core.today()}"></div></div><label for="pr">UPI reference <span class="hint">(optional, stops double counting)</span></label><input id="pr" name="upi_ref" autocomplete="off"><button style="margin-top:16px">Record payment</button></form></section>
+  <section class="sec"><h2>Customer link</h2><p class="muted">They see the amount, your QR and UPI ID, and can tell you when they have paid.</p>
   <div class="copy"><input readonly value="${esc(link)}" aria-label="Customer link">${copyBtn(link)}</div>
-  <p style="margin-bottom:0"><a class="btn small ghost" href="${wa}" target="_blank" rel="noopener">Send on WhatsApp</a> <a class="btn small ghost" href="${esc(link)}" target="_blank">Preview</a></p></div>`;
-  res.send(page(`Order #${o.number}`, body, { user: req.user, nav: 'orders', flash: { ok: req.query.ok, err: req.query.err } }));
+  <div class="btns" style="margin-top:12px"><a class="btn small ghost" href="${wa}" target="_blank" rel="noopener">${icon('send')}Send on WhatsApp</a><a class="btn small ghost" href="${esc(link)}" target="_blank" rel="noopener">${icon('open')}Preview</a></div></section>
+  </div></div>`;
+  res.send(page(`${o.customer} · order #${o.number}`, body, { user: req.user, nav: 'orders', flash: { ok: req.query.ok, err: req.query.err } }));
 }));
 
 // ---- settings

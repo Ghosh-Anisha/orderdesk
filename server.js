@@ -214,12 +214,12 @@ app.get('/orders/:n', authed, h(async (req, res) => {
 }));
 
 // ---- products (catalogue). Same core functions as Claude's save_products.
-const csvForm = (csv = '') => `<form method="post" action="/products/import/preview" class="subform" id="csv"><h3>Upload a price list</h3>
+const csvForm = (csv = '') => `<form method="post" action="/products/import/preview" class="subform" id="csv"><h2>Upload a price list</h2>
   <p class="muted">A CSV file from Excel or Google Sheets with a <b>name</b> column and a <b>price</b> column. You will see a preview before anything is saved.</p>
   <label for="csvf">CSV file</label><input id="csvf" type="file" accept=".csv,text/csv,text/plain" data-csv="csvt">
   <label for="csvt">Or paste rows <span class="hint">(name, price on each line)</span></label><textarea id="csvt" name="csv" rows="4" placeholder="name,price&#10;Brownie box of 6,620&#10;Banana bread,380">${esc(csv)}</textarea>
   <button class="small" style="margin-top:12px">Preview</button></form>`;
-const addProductForm = `<form method="post" action="/products/add" class="addrow"><h3>Add a product</h3><div class="grid2"><div><label for="np">Name</label><input id="np" name="name" required placeholder="e.g. Brownie box of 6" autocomplete="off"></div>
+const addProductForm = `<form method="post" action="/products/add" class="addrow"><h2>Add a product</h2><div class="grid2"><div><label for="np">Name</label><input id="np" name="name" required placeholder="e.g. Brownie box of 6" autocomplete="off"></div>
   <div><label for="npp">Price (₹)</label><input id="npp" name="price" type="number" inputmode="decimal" step="any" min="0" required></div></div><button class="small" style="margin-top:12px">${icon('plus')}Add product</button></form>`;
 
 app.get('/products', authed, h(async (req, res) => {

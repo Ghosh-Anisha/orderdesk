@@ -206,6 +206,23 @@ r = await z.call('save_recipe', { product: 'Brownie box of 6', price: 500, yield
 await z.call('save_recipe', { product: 'Brownie box of 6', price: 500, yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100, unit: 'g', pack_size: 1000, pack_price: 999 }] });
 r = await z.call('remove_expense', { month: '2027-03', category: 'rent share' }); assert.ok(r.err); ok('second business cannot remove the first business\'s expenses');
 r = await z.call('remove_recipe', { product: 'Brownie box of 6' }); assert.match(r.t, /Removed/);
+
+// ---- web recipes and make list, through the same core functions
+let rp = await (await fetch(B + '/recipes', { headers: { cookie: A.cookie } })).text();
+assert.ok(rp.includes('cost unknown, add a recipe or ask Claude')); const ltId = rp.match(/href="\/recipes\/(\d+)" aria-label="Add recipe for Lemon tart"/)[1]; ok('Recipes page: products without a recipe say cost unknown, add a recipe or ask Claude');
+wr = await fetch(B + `/recipes/${ltId}`, form([['yield_qty', '6'], ['packaging_cost', '5'], ['notes', ''], ['lname', 'Butter'], ['lqty', '60'], ['lunit', 'g'], ['lsize', '500'], ['lprice', '250'], ['lshelf', ''],
+  ['lname', 'Lemons'], ['lqty', '3'], ['lunit', 'piece'], ['lsize', ''], ['lprice', ''], ['lshelf', '']], A.cookie));
+assert.equal(wr.status, 400); assert.match(await wr.text(), /&quot;Lemons&quot; is a new ingredient/); ok('web recipe: a new ingredient without pack details is refused, nothing saved');
+wr = await fetch(B + `/recipes/${ltId}`, form([['yield_qty', '6'], ['packaging_cost', '5'], ['notes', ''], ['lname', 'Butter'], ['lqty', '60'], ['lunit', 'g'], ['lsize', '500'], ['lprice', '250'], ['lshelf', ''],
+  ['lname', 'Lemons'], ['lqty', '3'], ['lunit', 'piece'], ['lsize', '6'], ['lprice', '60'], ['lshelf', '7'], ['lname', ''], ['lqty', ''], ['lunit', 'g'], ['lsize', ''], ['lprice', ''], ['lshelf', '']], A.cookie));
+assert.equal(wr.status, 302); r = await call('list_products', {}); assert.equal(r.j.find(p => p.name === 'Lemon tart').cost_per_item, 15); ok('web recipe saved through save_recipe logic: (₹30 + ₹30) / 6 + ₹5 = ₹15 a tart');
+assert.equal((await fetch(B + `/recipes/${ltId}`, { headers: { cookie: Z.cookie } })).status, 404); ok('web: second business cannot open the first business\'s recipe');
+await fetch(B + `/recipes/${ltId}/delete`, form({}, Z.cookie)); r = await call('list_products', {}); assert.equal(r.j.find(p => p.name === 'Lemon tart').cost_per_item, 15); ok('web: second business cannot delete it either');
+wr = await fetch(B + `/recipes/${ltId}/delete`, form({}, A.cookie)); r = await call('list_products', {}); assert.equal(r.j.find(p => p.name === 'Lemon tart').cost_per_item, 'cost unknown'); ok('web Delete recipe: cost back to unknown');
+await call('save_recipe', { product: 'Cupcakes', yield_qty: 12, lines: [{ ingredient: 'Flour', qty: 200 }, { ingredient: 'Butter', qty: 120 }, { ingredient: 'Eggs', qty: 3 }, { ingredient: 'Cream', qty: 120 }] });
+let mkp = await (await fetch(B + '/make?from=2027-03-01&to=2027-03-31', { headers: { cookie: A.cookie } })).text();
+assert.ok(mkp.includes('Use soon after opening') && mkp.includes('Cream') && /For orders on .*Fri, 12 Mar/.test(mkp) && mkp.includes('Not counted: no recipe')); ok('web make list: perishables with the order dates they serve, and items with no recipe');
+mkp = await (await fetch(B + '/make?from=2027-03-31&to=2027-03-01', { headers: { cookie: A.cookie } })).text(); assert.ok(mkp.includes('is after due_to')); ok('web make list: reversed dates explained');
 wr = await fetch(B + `/expenses/${expId}/delete`, form({}, Z.cookie)); assert.match(decodeURIComponent(wr.headers.get('location')), /not found/);
 r = await call('profit_summary', { month: '2027-03' }); assert.equal(r.j.overhead, 250); ok('web: second business cannot delete the first business\'s expense');
 assert.ok(!(await (await fetch(B + '/money?month=2027-03', { headers: { cookie: Z.cookie } })).text()).includes('new flat share')); ok('web: second business\'s Money page shows none of the first\'s');

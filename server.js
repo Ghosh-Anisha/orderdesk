@@ -113,7 +113,7 @@ app.get('/', authed, h(async (req, res) => {
 
 // ---- orders
 const itemRows = items => (items.length ? items : [{ name: '', qty: 1, unit_paise: null }]).map(i => `<tr><td class="c-item"><input name="iname" value="${esc(i.name)}" placeholder="Start typing a product" aria-label="Item" list="catalogue" autocomplete="off"></td>
-<td class="c-qty"><input name="iqty" type="number" inputmode="decimal" step="any" min="0" value="${i.qty}" aria-label="Quantity"></td><td class="c-price"><input name="iprice" type="number" inputmode="decimal" step="any" min="0" value="${i.name && i.unit_paise != null ? i.unit_paise / 100 : ''}" placeholder="from products" aria-label="Price each in rupees"></td></tr>`).join('');
+<td class="c-qty"><input name="iqty" data-default="1" type="number" inputmode="decimal" step="any" min="0" value="${i.qty}" aria-label="Quantity"></td><td class="c-price"><input name="iprice" type="number" inputmode="decimal" step="any" min="0" value="${i.name && i.unit_paise != null ? i.unit_paise / 100 : ''}" placeholder="from products" aria-label="Price each in rupees"></td></tr>`).join('');
 const itemsTable = (items, catalogue = []) => { const live = catalogue.filter(p => p.active && p.price_paise !== null);
   return `<table id="items" class="itable" data-prices="${esc(JSON.stringify(Object.fromEntries(live.map(p => [p.name.toLowerCase(), p.price_paise / 100]))))}"><thead><tr><th>Item</th><th>Qty</th><th>Price each (₹)</th></tr></thead><tbody>${itemRows(items)}</tbody></table>
 <datalist id="catalogue">${live.map(p => `<option value="${esc(p.name)}">${inr(p.price_paise)}</option>`).join('')}</datalist>
@@ -321,6 +321,96 @@ app.post('/expenses/:id/field', authed, allow('add_expense'), h(async (req, res)
 app.post('/expenses/:id/delete', authed, allow('add_expense'), h(async (req, res) => {
   try { const r = await core.removeExpense(req.user.bid, { id: +req.params.id }); toMoney(res, r.month, 'ok', `Deleted ${r.category} (${inr(r.amount_paise)}).`); }
   catch (e) { if (!(e instanceof core.UserError)) throw e; res.redirect('/money?err=' + encodeURIComponent(e.message)); }
+}));
+
+// ---- recipes and make list: same core.saveRecipe / removeRecipe / makeList as Claude's tools
+const qty = (n, unit) => `${Math.round(n * 100) / 100}${unit === 'piece' ? '' : ' ' + unit}`;
+const kitchenTabs = (u, on) => (can(u, 'save_recipe') && can(u, 'make_list')) ? `<nav class="tabs" aria-label="Kitchen">${[['/recipes', 'Recipes', 'recipes'], ['/make', 'Make list', 'make']].map(([h, l, k]) => `<a href="${h}"${on === k ? ' aria-current="page"' : ''}>${l}</a>`).join('')}</nav>` : '';
+
+app.get('/recipes', authed, allow('save_recipe'), h(async (req, res) => {
+  const ps = await core.listProducts(req.user.bid);
+  const body = `<div class="head"><div><h1>Recipes</h1><p class="muted">What each product costs to make, from your ingredient pack prices.</p></div></div>${kitchenTabs(req.user, 'recipes')}
+  ${!ps.length ? `<section class="sec empty"><h2>No products yet</h2><p>Add your products first, then a recipe for each. Or tell Claude: "here is how I make my brownies: 100 g flour, 100 g butter, 2 eggs, makes one box".</p><div class="btns"><a class="btn" href="/products">Go to Products</a></div></section>`
+    : `<div class="sec flush"><table class="rtable"><thead><tr><th>Product</th><th class="num">Price</th><th class="num">Cost a piece</th><th class="num">Margin a piece</th><th><span class="sr">Recipe</span></th></tr></thead><tbody>
+    ${ps.map(p => { const r = p.recipe, m = r && p.price_paise !== null ? p.price_paise - r.unit_cost : null;
+      return `<tr><td class="c-p"><b>${esc(p.name)}</b>${p.active ? '' : ' <span class="chip off">Off sale</span>'}</td><td class="num" data-l="Price">${p.price_paise === null ? '<span class="muted">no price</span>' : inr(p.price_paise)}</td>
+      ${r ? `<td class="num" data-l="Cost a piece">${inr(Math.round(r.unit_cost))}</td><td class="num" data-l="Margin a piece">${m === null ? '–' : `<b>${inr(Math.round(m))}</b> <span class="muted">${p.price_paise ? Math.round(m / p.price_paise * 100) + '%' : ''}</span>`}</td>`
+        : '<td class="none" colspan="2"><span class="muted">cost unknown, add a recipe or ask Claude</span></td>'}
+      <td class="c-a"><a class="btn small ghost" href="/recipes/${p.id}" aria-label="${r ? 'Edit recipe' : 'Add recipe'} for ${esc(p.name)}">${r ? 'Edit recipe' : `${icon('plus')}Add recipe`}</a></td></tr>`; }).join('')}</tbody></table></div>
+    <p class="muted">Margin a piece is before overhead. The month's full picture, with gas and other expenses shared in, is on <a href="/money">Money</a>.</p>`}`;
+  res.send(page('Recipes', body, { user: req.user, nav: 'recipes', flash: { ok: req.query.ok, err: req.query.err } }));
+}));
+
+const recipeForm = async (u, p, v, err, ok) => {
+  const book = await core.recipeBook(u.bid), r = book.get(p.id), ings = await core.listIngredients(u.bid);
+  const lines = v ? v.lines : (r ? r.lines.map(l => ({ ingredient: l.name, qty: l.qty, unit: l.unit, pack_size: l.pack_size, pack_price: l.pack_price_paise / 100, use_within_days_after_opening: l.use_within_days_after_opening ?? '' })) : []);
+  const rows = [...lines, { ingredient: '', qty: '', unit: 'g', pack_size: '', pack_price: '', use_within_days_after_opening: '' }];
+  const known = Object.fromEntries(ings.map(i => [i.name.toLowerCase(), { unit: i.unit, size: i.pack_size, price: i.pack_price_paise / 100, shelf: i.use_within_days_after_opening ?? '' }]));
+  const f = v || { yield_qty: r?.yield_qty ?? 1, packaging_cost: r ? r.packaging_paise / 100 : 0, notes: r?.notes ?? '' };
+  const m = r && p.price_paise !== null ? p.price_paise - r.unit_cost : null;
+  return page(`${p.name} recipe`, `<a class="back" href="/recipes">${icon('back')}Recipes</a>
+  <div class="head"><div><h1>${esc(p.name)}</h1><p class="muted">${p.price_paise === null ? 'No price yet. Set it on <a href="/products">Products</a>.' : `Sells for ${inr(p.price_paise)}`}</p></div></div>
+  ${r ? `<dl class="stats"><div><dt>Batch cost</dt><dd>${inr(Math.round(r.batch_cost))}</dd></div><div><dt>Cost a piece</dt><dd>${inr(Math.round(r.unit_cost))}</dd></div>${m === null ? '' : `<div><dt>Margin a piece</dt><dd>${inr(Math.round(m))}</dd></div>`}</dl>`
+    : '<div class="warn" role="note">No recipe yet, so this product\'s cost is unknown. Fill this in, or tell Claude how you make it.</div>'}
+  ${err ? `<div class="err" role="alert">${esc(err)}</div>` : ''}
+  <form method="post" action="/recipes/${p.id}" class="sec"><div class="grid2"><div><label for="ry">One batch makes</label><input id="ry" name="yield_qty" type="number" inputmode="decimal" step="any" min="0" required value="${esc(f.yield_qty)}"></div>
+  <div><label for="rp">Packaging per piece (₹) <span class="hint">box, ribbon, sticker</span></label><input id="rp" name="packaging_cost" type="number" inputmode="decimal" step="any" min="0" value="${esc(f.packaging_cost)}"></div></div>
+  <label for="rn">Notes <span class="hint">(optional)</span></label><input id="rn" name="notes" value="${esc(f.notes)}">
+  <h2 style="margin-top:28px">Ingredients for one batch</h2>
+  <table id="lines" class="ltable" data-ingredients="${esc(JSON.stringify(known))}"><thead><tr><th>Ingredient</th><th>Qty</th><th>Unit</th><th>Pack size</th><th>Pack price (₹)</th><th>Use within (days after opening)</th></tr></thead><tbody>
+  ${rows.map(l => `<tr><td class="c-i"><input name="lname" value="${esc(l.ingredient)}" list="ingredients" autocomplete="off" aria-label="Ingredient" placeholder="e.g. Butter"></td>
+    <td class="c-q"><input name="lqty" type="number" inputmode="decimal" step="any" min="0" value="${esc(l.qty)}" aria-label="Quantity for one batch"></td>
+    <td class="c-u"><select name="lunit" aria-label="Unit">${['g', 'ml', 'piece'].map(u => `<option${l.unit === u ? ' selected' : ''}>${u}</option>`).join('')}</select></td>
+    <td class="c-s"><input name="lsize" type="number" inputmode="decimal" step="any" min="0" value="${esc(l.pack_size)}" aria-label="Pack size, in the same unit"></td>
+    <td class="c-pr"><input name="lprice" type="number" inputmode="decimal" step="any" min="0" value="${esc(l.pack_price)}" aria-label="Pack price in rupees"></td>
+    <td class="c-sh"><input name="lshelf" type="number" inputmode="numeric" step="1" min="1" value="${esc(l.use_within_days_after_opening)}" placeholder="keeps" aria-label="Days usable after opening; empty if it keeps"></td></tr>`).join('')}</tbody></table>
+  <datalist id="ingredients">${ings.map(i => `<option value="${esc(i.name)}">`).join('')}</datalist>
+  <div class="btns" style="margin-top:10px"><button type="button" class="ghost small" data-additem="#lines">${icon('plus')}Add ingredient</button></div>
+  <p class="muted">Quantities are for one batch, in the ingredient's unit. Pack size and price are shared: changing them here updates every recipe that uses that ingredient. To remove a line, clear its ingredient.</p>
+  <div class="formfoot"><button>Save recipe</button><a class="btn ghost" href="/recipes">Cancel</a></div></form>
+  ${r ? `<form method="post" action="/recipes/${p.id}/delete" class="sec"><h2>Delete this recipe</h2><p class="muted">The product stays on your list; its cost shows as unknown until you add a recipe again.</p><button class="small ghost">Delete recipe</button></form>` : ''}`,
+  { user: u, nav: 'recipes', flash: { ok } });
+};
+const findProduct = async (bid, id) => (await core.listProducts(bid)).find(p => p.id === id);
+app.get('/recipes/:id', authed, allow('save_recipe'), h(async (req, res) => {
+  const p = await findProduct(req.user.bid, +req.params.id);
+  if (!p) return res.status(404).send(page('Not found', `<div class="sec empty"><h2>That product was not found</h2><p>It may have been renamed. Pick it from the list.</p><div class="btns"><a class="btn" href="/recipes">Back to recipes</a></div></div>`, { user: req.user, nav: 'recipes' }));
+  res.send(await recipeForm(req.user, p, null, null, req.query.ok));
+}));
+app.post('/recipes/:id', authed, allow('save_recipe'), h(async (req, res) => {
+  const p = await findProduct(req.user.bid, +req.params.id); if (!p) return res.redirect('/recipes');
+  const arr = v => (v === undefined ? [] : Array.isArray(v) ? v : [v]), b = req.body;
+  const n = arr(b.lname), qy = arr(b.lqty), un = arr(b.lunit), sz = arr(b.lsize), pr = arr(b.lprice), sh = arr(b.lshelf);
+  const lines = n.map((ingredient, i) => ({ ingredient, qty: qy[i], unit: un[i], pack_size: sz[i], pack_price: pr[i], use_within_days_after_opening: sh[i] }))
+    .filter(l => String(l.ingredient).trim() || String(l.qty).trim());
+  const v = { yield_qty: b.yield_qty, packaging_cost: b.packaging_cost, notes: b.notes, lines };
+  try { await core.saveRecipe(req.user.bid, { product: p.name, ...v }); res.redirect(`/recipes/${p.id}?ok=${encodeURIComponent('Recipe saved.')}`); }
+  catch (e) { if (!(e instanceof core.UserError)) throw e; res.status(400).send(await recipeForm(req.user, p, v, e.message)); }
+}));
+app.post('/recipes/:id/delete', authed, allow('save_recipe'), h(async (req, res) => {
+  const p = await findProduct(req.user.bid, +req.params.id); if (!p) return res.redirect('/recipes');
+  try { await core.removeRecipe(req.user.bid, p.name); res.redirect('/recipes?ok=' + encodeURIComponent(`Deleted the recipe for ${p.name}. Its cost now shows as unknown.`)); }
+  catch (e) { if (!(e instanceof core.UserError)) throw e; res.redirect('/recipes?err=' + encodeURIComponent(e.message)); }
+}));
+
+app.get('/make', authed, allow('make_list'), h(async (req, res) => {
+  const t = core.today(), from = req.query.from || t, to = req.query.to || new Date(Date.parse(t) + 6 * 864e5).toISOString().slice(0, 10);
+  let m, err;
+  try { m = await core.makeList(req.user.bid, from, to); } catch (e) { if (!(e instanceof core.UserError)) throw e; err = e.message; }
+  const picker = `<form method="get" action="/make" class="sec range"><div><label for="mf">From</label><input id="mf" type="date" name="from" value="${esc(from)}"></div><div><label for="mt">To</label><input id="mt" type="date" name="to" value="${esc(to)}"></div><button class="small">Show</button></form>`;
+  const perish = m ? m.ingredients.filter(n => n.use_within) : [];
+  const recipes = can(req.user, 'save_recipe');
+  const body = `<div class="head"><div><h1>Make list</h1><p class="muted">What to buy and measure for open orders due in these dates.</p></div></div>${kitchenTabs(req.user, 'make')}${picker}
+  ${err ? `<div class="err" role="alert">${esc(err)}</div>` : !m.orders ? `<section class="sec empty"><h2>No open orders due between ${when(m.from)} and ${when(m.to)}</h2><p>Pick other dates, or tell Claude: "what do I need to buy for this weekend?"</p></section>` : `
+  ${perish.length ? `<section class="sec hot"><h2>Use soon after opening</h2>${perish.map(n => `<div class="row"><div><b>${esc(n.ingredient)}</b> <span class="muted">· use within ${n.use_within} day${n.use_within === 1 ? '' : 's'} of opening · ${qty(n.qty, n.unit)} in all</span>
+    <div class="muted">For orders on ${n.dates.map(d => `${when(d.date)} (${d.orders.map(x => `<a href="/orders/${x}">#${x}</a>`).join(', ')})`).join(', ')}</div>
+    ${n.too_far_apart ? `<div class="late">These dates are ${n.use_within} or more days apart, so one opened pack will not last. Buy or open separately for the later orders.</div>` : ''}</div></div>`).join('')}</section>` : ''}
+  <section class="sec flush"><h2 class="inset">Ingredients for ${m.orders} open order${m.orders === 1 ? '' : 's'}</h2><table class="mklist"><thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num">Packs</th><th>For</th></tr></thead><tbody>
+    ${m.ingredients.map(n => `<tr><td><b>${esc(n.ingredient)}</b>${n.use_within ? ' <span class="chip waiting">Perishable</span>' : ''}</td><td class="num" data-l="Need">${qty(n.qty, n.unit)}</td>
+      <td class="num" data-l="Packs">${n.packs} × ${qty(n.pack_size, n.unit)}</td><td class="muted" data-l="For">${n.items.map(esc).join(', ')}</td></tr>`).join('')}</tbody></table></section>
+  ${m.missing.length ? `<section class="sec"><h2>Not counted: no recipe</h2><p class="muted">These items have no recipe, so their ingredients are not in the list above.${recipes ? ' Add a recipe, or tell' : ' Tell'} Claude how you make them.</p>
+    ${m.missing.map(x => `<div class="row"><div><b>${esc(x.item)}</b> <span class="muted">× ${x.qty} · orders ${x.orders.map(o => `<a href="/orders/${o}">#${o}</a>`).join(', ')}</span></div></div>`).join('')}</section>` : ''}`}`;
+  res.send(page('Make list', body, { user: req.user, nav: 'recipes' }));
 }));
 
 // ---- settings and team

@@ -71,8 +71,10 @@ app.post('/login', h(async (req, res) => {
 app.get('/logout', (req, res) => { res.setHeader('Set-Cookie', 'sid=; Path=/; Max-Age=0'); res.redirect('/login'); });
 
 // ---- today
-const orderRow = o => `<div class="row"><div><a href="/orders/${o.number}"><b>#${o.number} ${esc(o.customer)}</b></a><div class="muted">${when(o.due_date)} · ${o.items.map(i => esc(i.name)).slice(0, 2).join(', ')}${o.items.length > 2 ? '…' : ''}</div></div>
-<div style="text-align:right">${chip(o.pay)} <b class="num">${o.balance ? inr(o.balance) + ' due' : inr(o.total)}</b></div></div>`;
+const dayBox = d => { const x = new Date(d + 'T00:00:00Z'); return `<span class="day" aria-hidden="true"><b>${x.getUTCDate()}</b>${x.toLocaleDateString('en-IN', { weekday: 'short', timeZone: 'UTC' })}</span>`; };
+const orderRow = (o, t) => `<div class="row orow">${dayBox(o.due_date)}<div class="who"><a href="/orders/${o.number}"><b>${esc(o.customer)}</b></a> <span class="muted">#${o.number}</span>
+<div class="muted">${o.state === 'open' && o.due_date < t ? '<b class="late">Late</b> · ' : ''}<span class="sr">${when(o.due_date)} · </span>${o.items.map(i => esc(i.name)).slice(0, 2).join(', ')}${o.items.length > 2 ? '…' : ''}</div></div>
+<div class="end">${chip(o.pay)}<span class="num"><b>${inr(o.balance || o.total)}</b>${o.balance ? ' <span class="muted">due</span>' : ''}</span></div></div>`;
 
 app.get('/', authed, h(async (req, res) => {
   const bid = req.user.bid;
@@ -81,15 +83,16 @@ app.get('/', authed, h(async (req, res) => {
   const t = core.today(), week = new Date(Date.parse(t) + 7 * 864e5).toISOString().slice(0, 10);
   const soon = all.filter(o => o.state === 'open' && o.due_date <= week);
   const owed = all.filter(o => o.balance > 0);
-  let body = `<h1>Today</h1><p class="muted" style="margin:.3rem 0 20px">${when(t)}</p>`;
-  if (!all.length) body += `<div class="sec empty"><h2>No orders yet</h2><p>Add your first order here, or ask Claude to add them from your DMs or a sheet.</p>
-    <a class="btn" href="/orders/new">Add an order</a> <a class="btn ghost" href="/settings">Connect Claude</a></div>`;
+  const owedSum = owed.reduce((s, o) => s + o.balance, 0);
+  let body = `<div class="head"><div><h1>Today</h1><p class="muted">${when(t)}</p></div>${all.length ? `<a class="btn" href="/orders/new">${icon('plus')}Add an order</a>` : ''}</div>`;
+  if (!all.length) body += `<div class="sec empty"><h2>No orders yet</h2><p>Add your first order here, or connect Claude and ask it to bring orders in from your DMs or a sheet.</p>
+    <div class="btns"><a class="btn" href="/orders/new">${icon('plus')}Add an order</a><a class="btn ghost" href="/settings#claude">Connect Claude</a></div></div>`;
   else {
-    if (confirm.length) body += `<div class="sec hot"><h2>Payments to confirm</h2><p class="muted" style="margin-top:0">Customers say they paid. Check your UPI app, then confirm.</p>${confirm.map(p => `<div class="row"><div><b>${esc(p.customer)}</b> · order #${p.number}<div class="muted">${inr(p.amount_paise)} · ref <span class="mono">${esc(p.upi_ref || 'none given')}</span></div></div>
-      <form method="post" action="/payments/${p.id}/confirm" style="display:flex;gap:8px"><button class="small">Confirm</button><button class="small ghost" formaction="/payments/${p.id}/delete">Not received</button></form></div>`).join('')}</div>`;
-    body += `<div class="sec"><h2>Coming up (next 7 days)</h2>${soon.length ? soon.map(orderRow).join('') : '<p class="muted">Nothing due this week.</p>'}</div>
-      <div class="sec"><h2>Waiting for money · ${inr(owed.reduce((s, o) => s + o.balance, 0))}</h2>${owed.length ? owed.map(orderRow).join('') : '<p class="muted">Everyone has paid.</p>'}</div>
-      <a class="btn" href="/orders/new">Add an order</a>`;
+    body += `<dl class="stats"><div><dt>Due in 7 days</dt><dd>${soon.length}</dd></div><div><dt>Waiting for money</dt><dd>${inr(owedSum)}</dd></div><div><dt>To confirm</dt><dd>${confirm.length}</dd></div></dl>`;
+    if (confirm.length) body += `<section class="sec hot"><h2>Payments to confirm</h2><p class="muted">Customers say they paid. Check your UPI app first, then confirm.</p>${confirm.map(p => `<div class="row"><div><b>${esc(p.customer)}</b> <span class="muted">· order <a href="/orders/${p.number}">#${p.number}</a></span><div><b class="num">${inr(p.amount_paise)}</b> <span class="muted">· ref <span class="mono">${esc(p.upi_ref || 'none given')}</span></span></div></div>
+      <form method="post" action="/payments/${p.id}/confirm" class="btns end"><button class="small">${icon('check')}Confirm</button><button class="small ghost" formaction="/payments/${p.id}/delete">Not received</button></form></div>`).join('')}</section>`;
+    body += `<section class="sec"><h2>Coming up in the next 7 days</h2>${soon.length ? soon.map(o => orderRow(o, t)).join('') : '<p class="muted" style="margin:0">Nothing due this week. New orders will show here.</p>'}</section>
+      <section class="sec"><h2>Waiting for money</h2>${owed.length ? owed.map(o => orderRow(o, t)).join('') : '<p class="muted" style="margin:0">Everyone has paid.</p>'}</section>`;
   }
   res.send(page('Today', body, { user: req.user, nav: 'today' }));
 }));

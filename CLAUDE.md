@@ -4,7 +4,7 @@ Back office for home bakers who take orders in DMs and get paid on a personal UP
 
 ## Layout
 - `server.js`: all web routes, customer page, cron, MCP mount. Exports the Express app (Vercel runs it as one function).
-- `lib/core.js`: all order and payment logic. `lib/mcp.js`: the five tools. `lib/db.js`: Postgres + auto-created tables. `lib/ui.js`: shared HTML shell and CSS.
+- `lib/core.js`: all order and payment logic. `lib/mcp.js`: the five tools. `lib/access.js`: team permissions and Claude sign-in (OAuth). `lib/db.js`: Postgres + auto-created tables. `lib/ui.js`: shared HTML shell and CSS.
 - `npm test` runs `test/e2e.mjs` with a real MCP client. Keep it green. Start with `DATABASE_URL=... npm start`, then `BASE=http://localhost:3000 npm test`.
 
 ## Rules to keep
@@ -12,6 +12,7 @@ Back office for home bakers who take orders in DMs and get paid on a personal UP
 - Customer-reported payments do not count until the seller confirms.
 - Same UPI reference cannot be recorded twice per business.
 - Every query filters by business id. Tool errors are plain English.
+- Permissions use the tool names (`can(user, tool)`) and guard both the MCP tools and the web routes. The owner can do everything.
 - Vercel has no disk: images stay in the database.
 
 ## Design job (the next task): make it top notch

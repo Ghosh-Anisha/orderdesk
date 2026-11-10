@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import { q, ensureSchema } from './lib/db.js';
 import * as core from './lib/core.js';
 import { mcpHandler } from './lib/mcp.js';
+import { mountAccess, can, TOOLS, cleanTools, toolLabel, revokeUserTokens } from './lib/access.js';
 import { page, esc, inr, when, chip, icon, copyBtn } from './lib/ui.js';
 
 const app = express();
@@ -30,7 +31,7 @@ async function loadUser(req) {
   const sid = cookies(req).sid; if (!sid) return null;
   const [uid, sig] = sid.split('.');
   if (!sig || sign(uid) !== sig) return null;
-  const r = await q('SELECT u.id, u.email, b.id AS bid, b.name AS biz_name, b.upi_id, b.logo, b.qr, b.mcp_token FROM users u JOIN businesses b ON b.id=u.business_id WHERE u.id=$1', [uid]);
+  const r = await q('SELECT u.id, u.email, u.role, u.tools, b.id AS bid, b.name AS biz_name, b.upi_id, b.logo, b.qr FROM users u JOIN businesses b ON b.id=u.business_id WHERE u.id=$1', [uid]);
   return r.rows[0] || null;
 }
 const authed = h(async (req, res, next) => {
@@ -38,6 +39,12 @@ const authed = h(async (req, res, next) => {
   if (!req.user) return res.redirect('/login');
   next();
 });
+// same permission names as the Claude tools, so the web app and Claude agree on who can do what
+const allow = tool => (req, res, next) => can(req.user, tool) ? next()
+  : res.status(403).send(page('Not allowed', `<div class="sec empty"><h1>You can't do this</h1><p>Your email is not allowed to "${toolLabel(tool)}" for ${esc(req.user.biz_name)}. Ask the owner to allow it in Settings → Team.</p><div class="btns"><a class="btn" href="/">Go to Today</a></div></div>`, { user: req.user }));
+const ownerOnly = (req, res, next) => req.user.role === 'owner' ? next() : res.redirect('/settings');
+const safeNext = n => (typeof n === 'string' && n.startsWith('/oauth/authorize?')) ? n : null;
+mountAccess(app, { h, loadUser });
 const authForm = (title, action, fields, foot, err) => page(title, `<div class="auth"><p class="auth-brand">Orderly</p><h1>${title}</h1>
 <p class="muted">Orders, payments and a page your customers can pay from. Claude does the typing.</p>
 ${err ? `<div class="err" role="alert">${esc(err)}</div>` : ''}<form method="post" action="${action}" class="sec">${fields}<button class="wide" style="margin-top:20px">${title}</button></form><p>${foot}</p></div>`);
@@ -53,21 +60,23 @@ app.post('/signup', h(async (req, res) => {
   if (!/^\S+@\S+\.\S+$/.test(e)) return again('That email does not look right.');
   if (password.length < 8) return again('Use a password of at least 8 characters.');
   if ((await q('SELECT 1 FROM users WHERE email=$1', [e])).rowCount) return again('That email already has an account. Log in instead.');
+  if ((await q('SELECT 1 FROM invites WHERE email=$1', [e])).rowCount) return again('This email was invited to join a team. Open the invite link the owner sent you instead.');
   const b = (await q('INSERT INTO businesses (name, mcp_token) VALUES ($1,$2) RETURNING id', [name.trim(), core.token(32)])).rows[0];
-  const u = (await q('INSERT INTO users (business_id,email,password_hash) VALUES ($1,$2,$3) RETURNING id', [b.id, e, await bcrypt.hash(password, 10)])).rows[0];
+  const u = (await q("INSERT INTO users (business_id,email,password_hash,role) VALUES ($1,$2,$3,'owner') RETURNING id", [b.id, e, await bcrypt.hash(password, 10)])).rows[0];
   setSession(req, res, u.id); res.redirect('/settings?welcome=1');
 }));
-const loginForm = (err, email = '') => authForm('Log in', '/login',
-  `<label for="e">Email</label><input id="e" type="email" name="email" required value="${esc(email)}"><label for="p">Password</label><input id="p" type="password" name="password" required>`,
+const loginForm = (err, email = '', next = null) => authForm(next ? 'Log in to connect Claude' : 'Log in', '/login',
+  `${next ? `<input type="hidden" name="next" value="${esc(next)}">` : ''}<label for="e">Email</label><input id="e" type="email" name="email" required value="${esc(email)}"><label for="p">Password</label><input id="p" type="password" name="password" required>`,
   'New here? <a href="/signup">Create an account</a>', err);
-app.get('/login', (req, res) => res.send(loginForm()));
+app.get('/login', (req, res) => res.send(loginForm(null, '', safeNext(req.query.next))));
 app.post('/login', h(async (req, res) => {
   const e = (req.body.email || '').trim().toLowerCase();
   const u = (await q('SELECT id,password_hash FROM users WHERE email=$1', [e])).rows[0];
-  if (!u || !(await bcrypt.compare(req.body.password || '', u.password_hash))) return res.status(401).send(loginForm('Email or password is wrong.', e));
-  setSession(req, res, u.id); res.redirect('/');
+  const next = safeNext(req.body.next);
+  if (!u || !(await bcrypt.compare(req.body.password || '', u.password_hash))) return res.status(401).send(loginForm('Email or password is wrong.', e, next));
+  setSession(req, res, u.id); res.redirect(next || '/');
 }));
-app.get('/logout', (req, res) => { res.setHeader('Set-Cookie', 'sid=; Path=/; Max-Age=0'); res.redirect('/login'); });
+app.get('/logout', (req, res) => { const next = safeNext(req.query.next); res.setHeader('Set-Cookie', 'sid=; Path=/; Max-Age=0'); res.redirect(next ? `/login?next=${encodeURIComponent(next)}` : '/login'); });
 
 // ---- today
 const dayBox = d => { const x = new Date(d + 'T00:00:00Z'); return `<span class="day" aria-hidden="true"><b>${x.getUTCDate()}</b>${x.toLocaleDateString('en-IN', { weekday: 'short', timeZone: 'UTC' })}</span>`; };
@@ -83,13 +92,13 @@ app.get('/', authed, h(async (req, res) => {
   const soon = all.filter(o => o.state === 'open' && o.due_date <= week);
   const owed = all.filter(o => o.balance > 0);
   const owedSum = owed.reduce((s, o) => s + o.balance, 0);
-  let body = `<div class="head"><div><h1>Today</h1><p class="muted">${when(t)}</p></div>${all.length ? `<a class="btn" href="/orders/new">${icon('plus')}Add an order</a>` : ''}</div>`;
+  let body = `<div class="head"><div><h1>Today</h1><p class="muted">${when(t)}</p></div>${all.length && can(req.user, 'add_order') ? `<a class="btn" href="/orders/new">${icon('plus')}Add an order</a>` : ''}</div>`;
   if (!all.length) body += `<div class="sec empty"><h2>No orders yet</h2><p>Add your first order here, or connect Claude and ask it to bring orders in from your DMs or a sheet.</p>
-    <div class="btns"><a class="btn" href="/orders/new">${icon('plus')}Add an order</a><a class="btn ghost" href="/settings#claude">Connect Claude</a></div></div>`;
+    <div class="btns">${can(req.user, 'add_order') ? `<a class="btn" href="/orders/new">${icon('plus')}Add an order</a>` : ''}<a class="btn ghost" href="/settings#claude">Connect Claude</a></div></div>`;
   else {
     body += `<dl class="stats"><div><dt>Due in 7 days</dt><dd>${soon.length}</dd></div><div><dt>Waiting for money</dt><dd>${inr(owedSum)}</dd></div><div><dt>To confirm</dt><dd>${confirm.length}</dd></div></dl>`;
     if (confirm.length) body += `<section class="sec hot"><h2>Payments to confirm</h2><p class="muted">Customers say they paid. Check your UPI app first, then confirm.</p>${confirm.map(p => `<div class="row"><div><b>${esc(p.customer)}</b> <span class="muted">· order <a href="/orders/${p.number}">#${p.number}</a></span><div><b class="num">${inr(p.amount_paise)}</b> <span class="muted">· ref <span class="mono">${esc(p.upi_ref || 'none given')}</span></span></div></div>
-      <form method="post" action="/payments/${p.id}/confirm" class="btns end"><button class="small">${icon('check')}Confirm</button><button class="small ghost" formaction="/payments/${p.id}/delete">Not received</button></form></div>`).join('')}</section>`;
+      ${can(req.user, 'record_payment') ? `<form method="post" action="/payments/${p.id}/confirm" class="btns end"><button class="small">${icon('check')}Confirm</button><button class="small ghost" formaction="/payments/${p.id}/delete">Not received</button></form>` : '<span class="muted end">The owner confirms this</span>'}</div>`).join('')}</section>`;
     body += `<section class="sec"><h2>Coming up in the next 7 days</h2>${soon.length ? soon.map(o => orderRow(o, t)).join('') : '<p class="muted" style="margin:0">Nothing due this week. New orders will show here.</p>'}</section>
       <section class="sec"><h2>Waiting for money</h2>${owed.length ? owed.map(o => orderRow(o, t)).join('') : '<p class="muted" style="margin:0">Everyone has paid.</p>'}</section>`;
   }
@@ -114,8 +123,9 @@ app.get('/orders', authed, h(async (req, res) => {
   const show = req.query.show in VIEWS ? req.query.show : 'open';
   const rows = await core.listOrders(req.user.bid);
   const list = rows.filter(VIEWS[show]);
-  const sv = o => `data-save="/orders/${o.number}/field"`;
-  const body = `<div class="head"><h1>Orders</h1><a class="btn" href="/orders/new">${icon('plus')}Add an order</a></div>
+  const edit = can(req.user, 'update_order'), add = can(req.user, 'add_order');
+  const sv = o => edit ? `data-save="/orders/${o.number}/field"` : 'disabled';
+  const body = `<div class="head"><h1>Orders</h1>${add ? `<a class="btn" href="/orders/new">${icon('plus')}Add an order</a>` : ''}</div>
   <nav class="tabs" aria-label="Show orders">${[['open', 'Open'], ['unpaid', 'Unpaid'], ['delivered', 'Delivered'], ['all', 'All']].map(([k, l]) => `<a href="/orders?show=${k}"${show === k ? ' aria-current="page"' : ''}>${l} <span class="n">${rows.filter(VIEWS[k]).length}</span></a>`).join('')}</nav>
   ${list.length ? `<div class="sec flush"><table class="otable"><thead><tr><th>#</th><th>Customer</th><th>Due</th><th>Status</th><th class="num">Total</th><th>Payment</th></tr></thead><tbody>
   ${list.map(o => `<tr><td class="c-no"><a href="/orders/${o.number}" aria-label="Open order ${o.number}">#${o.number}</a></td>
@@ -123,8 +133,8 @@ app.get('/orders', authed, h(async (req, res) => {
   <td class="c-due"><input type="date" name="due_date" value="${o.due_date}" aria-label="Due date, order ${o.number}" ${sv(o)}></td>
   <td class="c-state">${stateSelect(o, `aria-label="Status, order ${o.number}" ${sv(o)}`)}</td>
   <td class="c-total num">${inr(o.total)}</td><td class="c-pay">${chip(o.pay)}${o.balance && o.paid ? `<span class="muted left">${inr(o.balance)} left</span>` : ''}</td></tr>`).join('')}</tbody></table></div>
-  <p class="muted">Change a name, date or status right in the list. It saves by itself.</p>`
-    : `<div class="sec empty"><h2>${rows.length ? `No ${show === 'all' ? '' : show + ' '}orders` : 'No orders yet'}</h2><p>${rows.length ? 'Try another view above, or add a new order.' : 'Add an order, or connect Claude and ask it to bring orders in from your DMs or a sheet.'}</p><div class="btns"><a class="btn" href="/orders/new">${icon('plus')}Add an order</a>${rows.length ? '' : '<a class="btn ghost" href="/settings#claude">Connect Claude</a>'}</div></div>`}`;
+  ${edit ? '<p class="muted">Change a name, date or status right in the list. It saves by itself.</p>' : ''}`
+    : `<div class="sec empty"><h2>${rows.length ? `No ${show === 'all' ? '' : show + ' '}orders` : 'No orders yet'}</h2><p>${rows.length ? 'Try another view above, or add a new order.' : 'Add an order, or connect Claude and ask it to bring orders in from your DMs or a sheet.'}</p><div class="btns">${add ? `<a class="btn" href="/orders/new">${icon('plus')}Add an order</a>` : ''}${rows.length ? '' : '<a class="btn ghost" href="/settings#claude">Connect Claude</a>'}</div></div>`}`;
   res.send(page('Orders', body, { user: req.user, nav: 'orders' }));
 }));
 
@@ -135,8 +145,8 @@ const newOrderForm = (v = {}) => `<a class="back" href="/orders">${icon('back')}
 <label for="n">Notes <span class="hint">(optional)</span></label><input id="n" name="notes" value="${esc(v.notes)}" placeholder="Eggless, message on cake…">
 <h2 style="margin-top:28px">Items</h2>${itemsTable(v.items?.length ? v.items.map(i => ({ ...i, unit_paise: core.toPaise(i.unit_price || 0) })) : [])}
 <div class="formfoot"><button>Save order</button><a class="btn ghost" href="/orders">Cancel</a></div></form>`;
-app.get('/orders/new', authed, (req, res) => res.send(page('New order', newOrderForm(), { user: req.user, nav: 'orders' })));
-app.post('/orders/new', authed, h(async (req, res) => {
+app.get('/orders/new', authed, allow('add_order'), (req, res) => res.send(page('New order', newOrderForm(), { user: req.user, nav: 'orders' })));
+app.post('/orders/new', authed, allow('add_order'), h(async (req, res) => {
   const b = req.body, items = readItems(b);
   try {
     const r = await core.addOrder(req.user.bid, { customer: b.customer, contact: b.contact, due_date: b.due_date, notes: b.notes, items }, { allowDuplicate: true });
@@ -147,21 +157,21 @@ app.post('/orders/new', authed, h(async (req, res) => {
   }
 }));
 
-app.post('/orders/:n/field', authed, h(async (req, res) => {
+app.post('/orders/:n/field', authed, allow('update_order'), h(async (req, res) => {
   try {
     await core.updateOrder(req.user.bid, +req.params.n, { [req.body.field]: req.body.value });
     res.json({ ok: true, reload: ['state', 'due_date'].includes(req.body.field) && false });
   } catch (e) { if (e instanceof core.UserError) return res.status(400).json({ error: e.message }); throw e; }
 }));
-app.post('/orders/:n/items', authed, h(async (req, res) => {
+app.post('/orders/:n/items', authed, allow('update_order'), h(async (req, res) => {
   try { await core.updateOrder(req.user.bid, +req.params.n, { items: readItems(req.body) }); res.redirect(`/orders/${req.params.n}?ok=Items+saved`); }
   catch (e) { if (e instanceof core.UserError) return res.redirect(`/orders/${req.params.n}?err=${encodeURIComponent(e.message)}`); throw e; }
 }));
-app.post('/orders/:n/payments', authed, h(async (req, res) => {
+app.post('/orders/:n/payments', authed, allow('record_payment'), h(async (req, res) => {
   try { await core.recordPayment(req.user.bid, +req.params.n, { amount: req.body.amount, paid_on: req.body.paid_on, upi_ref: req.body.upi_ref }); res.redirect(`/orders/${req.params.n}?ok=Payment+saved`); }
   catch (e) { if (e instanceof core.UserError) return res.redirect(`/orders/${req.params.n}?err=${encodeURIComponent(e.message)}`); throw e; }
 }));
-app.post('/payments/:id/:action(confirm|delete)', authed, h(async (req, res) => {
+app.post('/payments/:id/:action(confirm|delete)', authed, allow('record_payment'), h(async (req, res) => {
   try { await core.setPaymentState(req.user.bid, +req.params.id, req.params.action); } catch (e) { if (!(e instanceof core.UserError)) throw e; }
   res.redirect(req.get('referer')?.startsWith(base(req)) ? req.get('referer') : '/');
 }));
@@ -170,7 +180,8 @@ app.get('/orders/:n', authed, h(async (req, res) => {
   let o; try { o = await core.getOrder(req.user.bid, +req.params.n); } catch (e) { if (e instanceof core.UserError) return res.status(404).send(page('Not found', `<div class="sec empty"><h2>${esc(e.message)}</h2><p>It may have a different number. Find it in your orders list.</p><div class="btns"><a class="btn" href="/orders">Back to orders</a></div></div>`, { user: req.user, nav: 'orders' })); throw e; }
   const link = `${base(req)}/o/${o.public_token}`;
   const wa = `https://wa.me/?text=${encodeURIComponent(`Hi ${o.customer}, here is your order from ${req.user.biz_name}. You can see the amount and pay here: ${link}`)}`;
-  const sv = `data-save="/orders/${o.number}/field"`;
+  const edit = can(req.user, 'update_order'), money = can(req.user, 'record_payment');
+  const sv = edit ? `data-save="/orders/${o.number}/field"` : 'disabled';
   const body = `<a class="back" href="/orders">${icon('back')}Orders</a>
   <div class="head"><div><h1>${esc(o.customer)}</h1><p class="muted">Order #${o.number} · due ${when(o.due_date)}</p></div>
   <div class="bal">${chip(o.pay)}<b class="num">${o.balance ? inr(o.balance) : inr(o.total)}</b><span class="muted">${o.balance ? 'still due' : 'paid in full'}</span></div></div>
@@ -179,13 +190,14 @@ app.get('/orders/:n', authed, h(async (req, res) => {
   <div><label for="f2">Phone or Instagram</label><input id="f2" name="contact" value="${esc(o.contact)}" ${sv}></div>
   <div><label for="f3">Due date</label><input id="f3" type="date" name="due_date" value="${o.due_date}" ${sv}></div>
   <div><label for="f4">Status</label>${stateSelect(o, `id="f4" ${sv}`)}</div></div>
-  <label for="f5">Notes</label><input id="f5" name="notes" value="${esc(o.notes)}" ${sv}><p class="muted" style="margin:10px 0 0">Changes here save by themselves.</p></section>
-  <form method="post" action="/orders/${o.number}/items" class="sec"><h2>Items</h2>${itemsTable(o.items)}<div class="formfoot"><button>Save items</button><b class="num">Total ${inr(o.total)}</b></div></form>
+  <label for="f5">Notes</label><input id="f5" name="notes" value="${esc(o.notes)}" ${sv}><p class="muted" style="margin:10px 0 0">${edit ? 'Changes here save by themselves.' : 'Only people allowed to change orders can edit these.'}</p></section>
+  ${edit ? `<form method="post" action="/orders/${o.number}/items" class="sec"><h2>Items</h2>${itemsTable(o.items)}<div class="formfoot"><button>Save items</button><b class="num">Total ${inr(o.total)}</b></div></form>`
+    : `<section class="sec"><h2>Items</h2>${itemsList(o)}</section>`}
   </div><div>
   <section class="sec"><h2>Payments</h2>${o.payments.map(p => `<div class="row"><div><b class="num">${inr(p.amount_paise)}</b> <span class="muted">${when(p.paid_on)}${p.upi_ref ? ' · ref <span class="mono">' + esc(p.upi_ref) + '</span>' : ''}</span>${p.state === 'reported' ? '<div><span class="chip waiting">Customer says paid</span></div>' : ''}</div>
-    <form method="post" class="btns">${p.state === 'reported' ? `<button class="small" formaction="/payments/${p.id}/confirm">${icon('check')}Confirm</button><button class="small ghost" formaction="/payments/${p.id}/delete">Not received</button>` : `<button class="small ghost" formaction="/payments/${p.id}/delete">Remove</button>`}</form></div>`).join('') || '<p class="muted">No payments yet.</p>'}
-  <form method="post" action="/orders/${o.number}/payments" class="subform"><h3>Record a payment</h3><div class="grid2"><div><label for="pa">Amount received (₹)</label><input id="pa" name="amount" type="number" inputmode="decimal" step="any" min="0" required value="${o.balance ? o.balance / 100 : ''}"></div>
-  <div><label for="pd">Date</label><input id="pd" name="paid_on" type="date" value="${core.today()}"></div></div><label for="pr">UPI reference <span class="hint">(optional, stops double counting)</span></label><input id="pr" name="upi_ref" autocomplete="off"><button style="margin-top:16px">Record payment</button></form></section>
+    ${!money ? (p.state === 'reported' ? '<span class="muted">The owner confirms this</span>' : '') : `<form method="post" class="btns">${p.state === 'reported' ? `<button class="small" formaction="/payments/${p.id}/confirm">${icon('check')}Confirm</button><button class="small ghost" formaction="/payments/${p.id}/delete">Not received</button>` : `<button class="small ghost" formaction="/payments/${p.id}/delete">Remove</button>`}</form>`}</div>`).join('') || '<p class="muted">No payments yet.</p>'}
+  ${money ? `<form method="post" action="/orders/${o.number}/payments" class="subform"><h3>Record a payment</h3><div class="grid2"><div><label for="pa">Amount received (₹)</label><input id="pa" name="amount" type="number" inputmode="decimal" step="any" min="0" required value="${o.balance ? o.balance / 100 : ''}"></div>
+  <div><label for="pd">Date</label><input id="pd" name="paid_on" type="date" value="${core.today()}"></div></div><label for="pr">UPI reference <span class="hint">(optional, stops double counting)</span></label><input id="pr" name="upi_ref" autocomplete="off"><button style="margin-top:16px">Record payment</button></form>` : ''}</section>
   <section class="sec"><h2>Customer link</h2><p class="muted">They see the amount, your QR and UPI ID, and can tell you when they have paid.</p>
   <div class="copy"><input readonly value="${esc(link)}" aria-label="Customer link">${copyBtn(link)}</div>
   <div class="btns" style="margin-top:12px"><a class="btn small ghost" href="${wa}" target="_blank" rel="noopener">${icon('send')}Send on WhatsApp</a><a class="btn small ghost" href="${esc(link)}" target="_blank" rel="noopener">${icon('open')}Preview</a></div></section>
@@ -193,9 +205,20 @@ app.get('/orders/:n', authed, h(async (req, res) => {
   res.send(page(`${o.customer} · order #${o.number}`, body, { user: req.user, nav: 'orders', flash: { ok: req.query.ok, err: req.query.err } }));
 }));
 
-// ---- settings
+// ---- settings and team
+const toolBoxes = (name, chosen, idp) => `<fieldset class="tools"><legend>What Claude and the app may do for this email</legend>${TOOLS.map(([t, l, d]) => `<label class="check"><input type="checkbox" name="${name}" value="${t}"${t === 'list_orders' ? ' checked disabled' : chosen.includes(t) ? ' checked' : ''}${idp ? ` id="${idp}-${t}"` : ''}><span><b>${l}</b><span class="muted">${d}</span></span></label>`).join('')}</fieldset>`;
+const toolNames = tools => cleanTools(tools).map(toolLabel).join(', ');
+
 app.get('/settings', authed, h(async (req, res) => {
-  const u = req.user, url = `${base(req)}/mcp/${u.mcp_token}`;
+  const u = req.user, url = `${base(req)}/mcp`, owner = u.role === 'owner';
+  const connect = `<section class="sec" id="claude"><h2>Connect Claude</h2><p class="muted">Then you can tell Claude "add an order for Priya, 12 brownies, Saturday", or drop in a sheet or a screenshot of your DMs, and it fills this app for you.</p>
+  <ol class="steps"><li>Copy the connector address below.</li><li>In Claude, open <b>Settings → Connectors → Add custom connector</b>, name it <b>${esc(u.biz_name)}</b>, paste the address and add it.</li><li>Click <b>Connect</b>. An Orderly sign-in opens: log in as <b>${esc(u.email)}</b> and press <b>Allow</b>.</li><li>Open a new chat and say "show my orders".</li></ol>
+  <div class="copy"><input readonly value="${esc(url)}" aria-label="Connector address">${copyBtn(url)}</div>
+  <p class="muted" style="margin-top:10px">The address is the same for everyone. Orderly knows who is connecting from the sign-in, so each person only gets what they are allowed.</p>
+  ${owner ? '' : `<h3 style="margin-top:16px">What you can do</h3><p class="muted">${toolNames(u.tools)}. The owner can change this.</p>`}</section>`;
+  if (!owner) return res.send(page('Settings', `<div class="head"><h1>Settings</h1></div>${connect}`, { user: u, nav: 'settings', flash: { ok: req.query.ok } }));
+  const members = (await q(`SELECT u.id, u.email, u.role, u.tools, (SELECT max(created_at) FROM oauth_tokens t WHERE t.user_id=u.id) AS seen FROM users u WHERE u.business_id=$1 ORDER BY u.role<>'owner', u.id`, [u.bid])).rows;
+  const invites = (await q('SELECT id, email, tools, token FROM invites WHERE business_id=$1 ORDER BY id', [u.bid])).rows;
   const img = (id, src, cls, alt) => src ? `<img id="${id}_p" class="${cls}" src="${src}" alt="${alt}" style="margin-top:10px">` : '';
   const body = `<div class="head"><h1>Settings</h1></div>${req.query.welcome ? '<div class="okmsg" role="status">Account created. Add your UPI details below, then connect Claude.</div>' : ''}
   <div class="split"><form method="post" action="/settings" class="sec"><h2>Your business</h2>
@@ -205,21 +228,62 @@ app.get('/settings', authed, h(async (req, res) => {
   <label for="qrf">UPI QR code <span class="hint">(optional, a screenshot from your UPI app)</span></label><input id="qrf" type="file" accept="image/*" data-img="700" data-target="qr" data-cls="qr"><input type="hidden" id="qr" name="qr">${img('qr', u.qr, 'qr', 'Your UPI QR code')}
   <label for="lg">Logo <span class="hint">(optional)</span></label><input id="lg" type="file" accept="image/*" data-img="400" data-target="logo" data-cls="logo"><input type="hidden" id="logo" name="logo">${img('logo', u.logo, 'logo', 'Your logo')}
   <div class="formfoot"><button>Save settings</button></div></form>
-  <section class="sec" id="claude"><h2>Connect Claude</h2><p class="muted">Then you can tell Claude "add an order for Priya, 12 brownies, Saturday", or drop in a sheet or a screenshot of your DMs, and it fills this app for you.</p>
-  <ol class="steps"><li>Copy your private link below.</li><li>In Claude, open <b>Customize → Connectors → + → Add custom connector</b>.</li><li>Name it <b>${esc(u.biz_name)}</b>, paste the link, choose <b>No sign in</b>, and add it.</li><li>Open a new chat and say "show my orders".</li></ol>
-  <div class="copy"><input readonly value="${esc(url)}" aria-label="Private Claude link">${copyBtn(url)}</div>
-  <p class="muted" style="margin-top:10px">Anyone with this link can read and change your orders, so keep it private.</p>
-  <form method="post" action="/settings/reset-link" class="subform"><h3>Link shared by mistake?</h3><p class="muted">Make a new link. The old one stops working, so paste the new one into Claude.</p><button class="small ghost">Make a new link</button></form></section></div>`;
-  res.send(page('Settings', body, { user: u, nav: 'settings', flash: { ok: req.query.ok } }));
+  <div>${connect}
+  <section class="sec" id="team"><h2>Team</h2><p class="muted">Each email signs in with its own password. You choose what each one may do, in the app and through Claude.</p>
+  ${members.map(m => m.role === 'owner' ? `<div class="row"><div><b>${esc(m.email)}</b><div class="muted">Owner · can do everything${m.seen ? ' · Claude connected' : ''}</div></div></div>`
+    : `<details class="row member"><summary><span><b>${esc(m.email)}</b><span class="muted">${toolNames(m.tools)}${m.seen ? ' · Claude connected' : ''}</span></span><span class="btn small ghost" aria-hidden="true">Change</span></summary>
+      <form method="post" action="/team/members/${m.id}">${toolBoxes('tools', cleanTools(m.tools), 'm' + m.id)}<div class="btns"><button class="small">Save</button><button class="small ghost" formaction="/team/members/${m.id}/remove">Remove from team</button></div></form></details>`).join('')}
+  ${invites.map(i => `<div class="row"><div><b>${esc(i.email)}</b> <span class="chip waiting">Invited</span><div class="muted">${toolNames(i.tools)}</div></div>
+    <form method="post" action="/team/invites/${i.id}/cancel" class="btns end">${copyBtn(`${base(req)}/join/${i.token}`, 'Copy invite link')}<button class="small ghost">Cancel invite</button></form></div>`).join('')}
+  <form method="post" action="/team/invite" class="subform"><h3>Add a teammate</h3><label for="ie">Their email</label><input id="ie" type="email" name="email" required autocomplete="off">
+  ${toolBoxes('tools', ['add_order', 'update_order'], 'new')}<button style="margin-top:12px">Create invite link</button>
+  <p class="muted" style="margin:10px 0 0">Send them the link. They set a password, then can log in here and connect their own Claude.</p></form></section></div></div>`;
+  res.send(page('Settings', body, { user: u, nav: 'settings', flash: { ok: req.query.ok, err: req.query.err } }));
 }));
-app.post('/settings', authed, h(async (req, res) => {
+app.post('/settings', authed, ownerOnly, h(async (req, res) => {
   const { name, upi_id = '', logo, qr } = req.body;
   const img = v => (v && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(v) && v.length < 900000) ? v : null;
   await q('UPDATE businesses SET name=$2, upi_id=$3, logo=COALESCE($4,logo), qr=COALESCE($5,qr) WHERE id=$1', [req.user.bid, (name || req.user.biz_name).trim(), upi_id.trim(), img(logo), img(qr)]);
   res.redirect('/settings?ok=Saved');
 }));
-app.post('/settings/reset-link', authed, h(async (req, res) => {
-  await q('UPDATE businesses SET mcp_token=$2 WHERE id=$1', [req.user.bid, core.token(32)]); res.redirect('/settings?ok=New+link+ready.+Update+it+in+Claude.');
+const back = (res, k, m) => res.redirect(`/settings?${k}=${encodeURIComponent(m)}#team`);
+app.post('/team/invite', authed, ownerOnly, h(async (req, res) => {
+  const e = String(req.body.email || '').trim().toLowerCase();
+  if (!/^\S+@\S+\.\S+$/.test(e)) return back(res, 'err', 'That email does not look right. Check it and try again.');
+  if ((await q('SELECT 1 FROM users WHERE email=$1', [e])).rowCount) return back(res, 'err', `${e} already has an Orderly account, so it cannot join your team. Ask them for a different email.`);
+  await q(`INSERT INTO invites (business_id,email,tools,token) VALUES ($1,$2,$3,$4) ON CONFLICT (business_id,email) DO UPDATE SET tools=EXCLUDED.tools`, [req.user.bid, e, cleanTools(req.body.tools), core.token(24)]);
+  back(res, 'ok', `Invite ready for ${e}. Copy the invite link and send it to them.`);
+}));
+app.post('/team/invites/:id/cancel', authed, ownerOnly, h(async (req, res) => {
+  await q('DELETE FROM invites WHERE id=$1 AND business_id=$2', [+req.params.id, req.user.bid]); back(res, 'ok', 'Invite cancelled. The link no longer works.');
+}));
+app.post('/team/members/:id', authed, ownerOnly, h(async (req, res) => {
+  const r = await q("UPDATE users SET tools=$3 WHERE id=$1 AND business_id=$2 AND role<>'owner' RETURNING email", [+req.params.id, req.user.bid, cleanTools(req.body.tools)]);
+  r.rowCount ? back(res, 'ok', `Saved. ${r.rows[0].email} now has these permissions, in the app and in Claude.`) : back(res, 'err', 'That teammate was not found.');
+}));
+app.post('/team/members/:id/remove', authed, ownerOnly, h(async (req, res) => {
+  const r = await q("DELETE FROM users WHERE id=$1 AND business_id=$2 AND role<>'owner' RETURNING email", [+req.params.id, req.user.bid]);
+  r.rowCount ? back(res, 'ok', `${r.rows[0].email} was removed. Their Claude connection stopped working.`) : back(res, 'err', 'That teammate was not found.');
+}));
+
+// invite links: the invited person sets a password and joins the owner's business
+const joinForm = (i, err) => page('Join team', `<div class="auth"><p class="auth-brand">Orderly</p><h1>Join ${esc(i.biz_name)}</h1>
+<p class="muted">You were invited as <b>${esc(i.email)}</b>. You will be able to: ${esc(toolNames(i.tools))}.</p>
+${err ? `<div class="err" role="alert">${esc(err)}</div>` : ''}<form method="post" class="sec"><label for="p">Choose a password (8 or more characters)</label><input id="p" type="password" name="password" minlength="8" required autocomplete="new-password"><button class="wide" style="margin-top:20px">Join team</button></form></div>`);
+const findInvite = tok => q('SELECT i.*, b.name AS biz_name FROM invites i JOIN businesses b ON b.id=i.business_id WHERE i.token=$1', [tok]).then(r => r.rows[0]);
+app.get('/join/:token', h(async (req, res) => {
+  const i = await findInvite(req.params.token);
+  if (!i) return res.status(404).send(page('Invite not found', '<div class="sec empty" style="margin-top:40px"><h1>This invite link does not work</h1><p>It may have been cancelled or already used. Ask the owner to send a new one.</p><div class="btns"><a class="btn" href="/login">Log in</a></div></div>'));
+  res.send(joinForm(i));
+}));
+app.post('/join/:token', h(async (req, res) => {
+  const i = await findInvite(req.params.token); if (!i) return res.redirect(`/join/${encodeURIComponent(req.params.token)}`);
+  const pw = String(req.body.password || '');
+  if (pw.length < 8) return res.status(400).send(joinForm(i, 'Use a password of at least 8 characters.'));
+  if ((await q('SELECT 1 FROM users WHERE email=$1', [i.email])).rowCount) return res.status(400).send(joinForm(i, 'This email already has an Orderly account. Log in instead, or ask the owner to invite a different email.'));
+  const u = (await q("INSERT INTO users (business_id,email,password_hash,role,tools) VALUES ($1,$2,$3,'member',$4) RETURNING id", [i.business_id, i.email, await bcrypt.hash(pw, 10), cleanTools(i.tools)])).rows[0];
+  await q('DELETE FROM invites WHERE id=$1', [i.id]);
+  setSession(req, res, u.id); res.redirect('/settings?ok=' + encodeURIComponent(`Welcome to ${i.biz_name}. Connect your Claude below.`));
 }));
 
 // ---- customer page
@@ -294,8 +358,10 @@ app.get('/o/:token/receipt', h(async (req, res) => {
 }));
 
 // ---- Claude connector + daily reminder
-app.post('/mcp/:token', h(mcpHandler));
-app.all('/mcp/:token', (req, res) => res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Use POST.' }, id: null }));
+app.post('/mcp', h(mcpHandler));
+app.all('/mcp', (req, res) => res.status(405).set('Allow', 'POST').json({ jsonrpc: '2.0', error: { code: -32000, message: 'Use POST.' }, id: null }));
+// the old secret links are switched off: everyone signs in now
+app.all('/mcp/:token', (req, res) => res.status(410).json({ jsonrpc: '2.0', error: { code: -32001, message: `This private link was replaced by sign-in. In Claude, remove this connector and add ${base(req)}/mcp instead, then sign in.` }, id: null }));
 
 app.get('/cron/reminders', h(async (req, res) => {
   if (process.env.CRON_SECRET && req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) return res.sendStatus(401);

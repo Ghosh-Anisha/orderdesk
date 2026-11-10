@@ -108,20 +108,24 @@ const readItems = b => {
   return n.map((name, i) => ({ name, qty: qy[i], unit_price: p[i] })).filter(i => String(i.name).trim() || i.unit_price);
 };
 
+const VIEWS = { open: o => o.state === 'open', unpaid: o => o.state !== 'cancelled' && o.balance > 0, delivered: o => o.state === 'delivered', all: () => true };
+const stateSelect = (o, attrs) => `<select name="state" ${attrs}>${[['open', 'Open'], ['delivered', 'Delivered'], ['cancelled', 'Cancelled']].map(([v, l]) => `<option value="${v}"${o.state === v ? ' selected' : ''}>${l}</option>`).join('')}</select>`;
+
 app.get('/orders', authed, h(async (req, res) => {
-  const show = req.query.show || 'open';
-  let rows = await core.listOrders(req.user.bid);
-  const tabs = { open: o => o.state === 'open', unpaid: o => o.state !== 'cancelled' && o.balance > 0, delivered: o => o.state === 'delivered', all: () => true };
-  const list = rows.filter(tabs[show] || tabs.open);
-  const body = `<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px"><h1>Orders</h1><a class="btn" href="/orders/new">Add an order</a></div>
-  <p>${[['open', 'Open'], ['unpaid', 'Unpaid'], ['delivered', 'Delivered'], ['all', 'All']].map(([k, l]) => `<a href="/orders?show=${k}" class="btn small ${show === k ? '' : 'ghost'}" style="margin-right:6px">${l}</a>`).join('')}</p>
-  <div class="sec" style="padding:8px;overflow-x:auto">${list.length ? `<table><thead><tr><th>#</th><th>Customer</th><th>Due</th><th class="hide-sm">Status</th><th class="num hide-sm">Total</th><th>Payment</th></tr></thead><tbody>
-  ${list.map(o => `<tr><td><a href="/orders/${o.number}">${o.number}</a></td><td style="min-width:110px"><input name="customer" value="${esc(o.customer)}" data-save="/orders/${o.number}/field"></td>
-  <td style="min-width:140px"><input type="date" name="due_date" value="${o.due_date}" data-save="/orders/${o.number}/field"></td>
-  <td class="hide-sm"><select name="state" data-save="/orders/${o.number}/field">${['open', 'delivered', 'cancelled'].map(s => `<option ${o.state === s ? 'selected' : ''}>${s}</option>`).join('')}</select></td>
-  <td class="num hide-sm">${inr(o.total)}</td><td>${chip(o.pay)}${o.balance && o.paid ? `<div class="muted">${inr(o.balance)} left</div>` : ''}</td></tr>`).join('')}</tbody></table>
-  <p class="muted" style="padding:0 6px">Click a name, date or status to change it. It saves by itself.</p>`
-      : `<div class="empty"><h2>Nothing here</h2><p>${rows.length ? 'No orders in this view.' : 'Add an order, or ask Claude to bring them in from your DMs or a sheet.'}</p></div>`}</div>`;
+  const show = req.query.show in VIEWS ? req.query.show : 'open';
+  const rows = await core.listOrders(req.user.bid);
+  const list = rows.filter(VIEWS[show]);
+  const sv = o => `data-save="/orders/${o.number}/field"`;
+  const body = `<div class="head"><h1>Orders</h1><a class="btn" href="/orders/new">${icon('plus')}Add an order</a></div>
+  <nav class="tabs" aria-label="Show orders">${[['open', 'Open'], ['unpaid', 'Unpaid'], ['delivered', 'Delivered'], ['all', 'All']].map(([k, l]) => `<a href="/orders?show=${k}"${show === k ? ' aria-current="page"' : ''}>${l} <span class="n">${rows.filter(VIEWS[k]).length}</span></a>`).join('')}</nav>
+  ${list.length ? `<div class="sec flush"><table class="otable"><thead><tr><th>#</th><th>Customer</th><th>Due</th><th>Status</th><th class="num">Total</th><th>Payment</th></tr></thead><tbody>
+  ${list.map(o => `<tr><td class="c-no"><a href="/orders/${o.number}" aria-label="Open order ${o.number}">#${o.number}</a></td>
+  <td class="c-name"><input name="customer" value="${esc(o.customer)}" aria-label="Customer, order ${o.number}" ${sv(o)}></td>
+  <td class="c-due"><input type="date" name="due_date" value="${o.due_date}" aria-label="Due date, order ${o.number}" ${sv(o)}></td>
+  <td class="c-state">${stateSelect(o, `aria-label="Status, order ${o.number}" ${sv(o)}`)}</td>
+  <td class="c-total num">${inr(o.total)}</td><td class="c-pay">${chip(o.pay)}${o.balance && o.paid ? `<span class="muted left">${inr(o.balance)} left</span>` : ''}</td></tr>`).join('')}</tbody></table></div>
+  <p class="muted">Change a name, date or status right in the list. It saves by itself.</p>`
+    : `<div class="sec empty"><h2>${rows.length ? `No ${show === 'all' ? '' : show + ' '}orders` : 'No orders yet'}</h2><p>${rows.length ? 'Try another view above, or add a new order.' : 'Add an order, or connect Claude and ask it to bring orders in from your DMs or a sheet.'}</p><div class="btns"><a class="btn" href="/orders/new">${icon('plus')}Add an order</a>${rows.length ? '' : '<a class="btn ghost" href="/settings#claude">Connect Claude</a>'}</div></div>`}`;
   res.send(page('Orders', body, { user: req.user, nav: 'orders' }));
 }));
 

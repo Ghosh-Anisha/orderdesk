@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import { q, ensureSchema } from './lib/db.js';
 import * as core from './lib/core.js';
 import { mcpHandler } from './lib/mcp.js';
-import { page, esc, inr, when, chip } from './lib/ui.js';
+import { page, esc, inr, when, chip, icon, copyBtn } from './lib/ui.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -178,7 +178,7 @@ app.get('/orders/:n', authed, h(async (req, res) => {
   <form method="post" action="/orders/${o.number}/payments"><div class="grid2"><div><label for="pa">Amount received (₹)</label><input id="pa" name="amount" type="number" step="any" min="0" required value="${o.balance ? o.balance / 100 : ''}"></div>
   <div><label for="pd">Date</label><input id="pd" name="paid_on" type="date" value="${core.today()}"></div></div><label for="pr">UPI reference (optional, stops double counting)</label><input id="pr" name="upi_ref"><button class="small" style="margin-top:14px">Record payment</button></form></div>
   <div class="sec"><h2>Customer link</h2><p class="muted" style="margin-top:0">They see the amount, your QR and UPI ID, and can tell you when they have paid.</p>
-  <div class="copy"><input readonly value="${esc(link)}" aria-label="Customer link"><button class="small" data-copy="${esc(link)}">Copy</button></div>
+  <div class="copy"><input readonly value="${esc(link)}" aria-label="Customer link">${copyBtn(link)}</div>
   <p style="margin-bottom:0"><a class="btn small ghost" href="${wa}" target="_blank" rel="noopener">Send on WhatsApp</a> <a class="btn small ghost" href="${esc(link)}" target="_blank">Preview</a></p></div>`;
   res.send(page(`Order #${o.number}`, body, { user: req.user, nav: 'orders', flash: { ok: req.query.ok, err: req.query.err } }));
 }));
@@ -195,7 +195,7 @@ app.get('/settings', authed, h(async (req, res) => {
   <button style="margin-top:18px">Save settings</button></form>
   <div class="sec"><h2>Connect Claude</h2><p class="muted" style="margin-top:0">Once connected, you can tell Claude "add an order for Priya, 12 brownies, Saturday" or drop in a sheet or screenshot of DMs and it fills this app for you.</p>
   <ol class="steps"><li>Copy your private link below.</li><li>In Claude, open <b>Customize → Connectors → + → Add custom connector</b>.</li><li>Name it <b>${esc(u.biz_name)}</b>, paste the link, choose <b>No sign in</b>, and add it.</li><li>Open a new chat and say "show my orders".</li></ol>
-  <div class="copy"><input readonly value="${esc(url)}" aria-label="Private Claude link"><button class="small" data-copy="${esc(url)}">Copy</button></div>
+  <div class="copy"><input readonly value="${esc(url)}" aria-label="Private Claude link">${copyBtn(url)}</div>
   <p class="muted">Anyone with this link can read and change your orders, so keep it private.</p>
   <form method="post" action="/settings/reset-link"><button class="small ghost">Make a new link</button> <span class="muted">The old one stops working.</span></form></div>`;
   res.send(page('Settings', body, { user: u, nav: 'settings', flash: { ok: req.query.ok } }));
@@ -211,50 +211,74 @@ app.post('/settings/reset-link', authed, h(async (req, res) => {
 }));
 
 // ---- customer page
-const publicShell = (b, inner) => page(`${b.name} · your order`, `<div class="pay-card">${b.logo ? `<img class="logo" src="${b.logo}" alt="">` : `<h2 style="margin:0">${esc(b.name)}</h2>`}${inner}</div>`);
-const itemsList = o => `<table style="margin:12px 0"><tbody>${o.items.map(i => `<tr><td>${esc(i.name)} × ${i.qty}</td><td class="num">${inr(Math.round(i.qty * i.unit_paise))}</td></tr>`).join('')}<tr><td><b>Total</b></td><td class="num"><b>${inr(o.total)}</b></td></tr></tbody></table>`;
+// The amount is split so the ₹ sign can sit small; the aria-label keeps it one readable number.
+const bigAmount = p => { const s = inr(p); return `<div class="amt" style="--len:${s.length - 0.5}" aria-label="${s}"><span class="cur" aria-hidden="true">₹</span><span aria-hidden="true">${s.slice(1)}</span></div>`; };
+const bizMark = b => `<div class="pay-biz">${b.logo ? `<img src="${b.logo}" alt="">` : ''}<span>${esc(b.name)}</span></div>`;
+const payShell = (b, hero, sheet, tone = '') => page(`${b.name} · your order`, `<main class="pay"><section class="pay-hero ${tone}"><div class="in">${bizMark(b)}${hero}</div></section>
+<section class="pay-sheet"><div class="in">${sheet}</div></section></main>`, { bare: 'paybody', theme: { done: '#2F5A21', off: '#1E2230' }[tone] || '#8A2646' });
+const itemsList = o => `<ul class="lines">${o.items.map(i => `<li><span>${esc(i.name)} <span class="muted">× ${i.qty}</span></span><span>${inr(Math.round(i.qty * i.unit_paise))}</span></li>`).join('')}
+<li class="tot"><span>Total</span><span>${inr(o.total)}</span></li>${o.paid && o.balance ? `<li class="got"><span>Received so far</span><span>${inr(o.paid)}</span></li>` : ''}</ul>`;
+const upiLink = (b, o, amount) => `upi://pay?${new URLSearchParams({ pa: b.upi_id, pn: b.name, am: (amount / 100).toFixed(2), cu: 'INR', tn: `Order ${o.number}` })}`;
+
 app.get('/o/:token', h(async (req, res) => {
   const r = await core.getByPublicToken(req.params.token);
-  if (!r) return res.status(404).send(page('Not found', '<div class="sec empty" style="margin-top:40px"><h2>This order link is not valid</h2><p>Ask the seller to send it again.</p></div>'));
+  if (!r) return res.status(404).send(page('Link not found', `<div class="sec empty" style="margin-top:40px"><h1>This order link does not work</h1><p>It may have been copied only in part. Ask the seller to send the link again.</p></div>`));
   const { order: o, business: b } = r;
-  const pending = o.payments.filter(p => p.state === 'reported');
-  let inner = `<p class="muted" style="margin:18px 0 0">Order for ${esc(o.customer)} · ${when(o.due_date)}</p>`;
-  if (o.state === 'cancelled') inner += `<h1 style="margin:10px 0">This order was cancelled</h1>`;
-  else if (o.pay === 'paid') inner += `<div class="big" style="color:var(--pista-d)">Paid, thank you!</div>${itemsList(o)}<a class="btn noprint" href="/o/${req.params.token}/receipt">Get receipt</a>`;
-  else {
-    const due = o.balance - o.reported;
-    inner += `<div class="big">${inr(o.balance)}</div><p style="margin:0">to pay</p>${itemsList(o)}`;
-    if (pending.length) inner += `<div class="okmsg">You told us you paid ${inr(o.reported)}. ${esc(b.name)} will confirm it soon.</div>`;
-    if (due > 0 || !pending.length) inner += `<div class="sec"><h2>Pay by UPI</h2>
-      ${b.qr ? `<img class="qr" src="${b.qr}" alt="UPI QR code">` : ''}
-      ${b.upi_id ? `<label>UPI ID</label><div class="copy"><input readonly value="${esc(b.upi_id)}"><button class="small" data-copy="${esc(b.upi_id)}">Copy</button></div>` : '<p class="muted">The seller has not added a UPI ID yet. Message them to pay.</p>'}
-      <label>Amount</label><div class="copy"><input readonly value="${o.balance / 100}"><button class="small" data-copy="${o.balance / 100}">Copy</button></div></div>
-      <form method="post" action="/o/${req.params.token}/paid" class="sec"><h2>Already paid?</h2><p class="muted" style="margin-top:0">Tell ${esc(b.name)} so they can mark it paid.</p>
-      <label for="a">Amount you paid (₹)</label><input id="a" name="amount" type="number" step="any" min="1" required value="${Math.max(due, 0) / 100 || o.balance / 100}">
-      <label for="r">UPI reference number</label><input id="r" name="upi_ref" required minlength="6" maxlength="30" placeholder="From your payment app, e.g. 4082 7391 5526" autocomplete="off">
-      <button style="width:100%;margin-top:16px">I've paid</button></form>`;
-  }
-  res.send(publicShell(b, inner + (req.query.err ? `<div class="err" role="alert">${esc(req.query.err)}</div>` : '')));
+  const tok = esc(req.params.token), first = esc(o.customer.split(' ')[0]);
+  const due = Math.max(o.balance - o.reported, 0);
+  const err = req.query.err ? `<div class="err" role="alert">${esc(req.query.err)}</div>` : '';
+  const order = `<div class="pay-part"><h2>Order #${o.number} · ${when(o.due_date)}</h2>${itemsList(o)}</div>`;
+
+  if (o.state === 'cancelled') return res.send(payShell(b,
+    `<p class="pay-for">Order #${o.number} for ${esc(o.customer)}</p><div class="amt words">This order was cancelled</div><p class="pay-note">Nothing to pay</p>`,
+    `${order}<div class="pay-part"><p style="margin:0">If this is a mistake, message ${esc(b.name)}.</p></div>`, 'off'));
+
+  if (o.pay === 'paid') return res.send(payShell(b,
+    `<span class="stamp go">${icon('check')}</span><p class="pay-for" style="margin-top:20px">Paid in full. Thank you, ${first}.</p>${bigAmount(o.total)}<p class="pay-note">Order #${o.number} · ${when(o.due_date)}</p>`,
+    `${order}<div class="pay-part"><a class="btn wide noprint" href="/o/${tok}/receipt">${icon('print')}Get receipt</a></div>`, 'done'));
+
+  const reportedNote = o.reported ? `You told us you paid ${inr(o.reported)}. ${esc(b.name)} will confirm it soon.` : '';
+  if (o.reported && !due) return res.send(payShell(b,
+    `${req.query.sent ? `<span class="stamp go" style="background:var(--saffron);color:var(--ink)">${icon('check')}</span>` : ''}<p class="pay-for">Hi ${first}, your payment is on its way to ${esc(b.name)}.</p>${bigAmount(o.reported)}
+    <p class="pay-note">${icon('clock')}Waiting for ${esc(b.name)} to confirm</p>`,
+    `<div class="pay-part" role="status"><h2>Nothing more to do</h2><p style="margin:0">${reportedNote} They check their UPI app, then this page will say Paid.</p></div>${order}${err}`));
+
+  const toPay = o.reported ? due : o.balance;
+  const pay = `<div class="pay-part"><h2>Pay by UPI</h2>
+    ${b.qr ? `<div class="pay-qr"><img class="qr" src="${b.qr}" alt="UPI QR code for ${esc(b.name)}"><span class="muted">Scan with any UPI app</span></div>` : ''}
+    ${b.upi_id ? `<div class="kv"><div><span class="k">UPI ID</span><span class="v mono">${esc(b.upi_id)}</span></div>${copyBtn(b.upi_id)}</div>` : `<p class="muted">${esc(b.name)} has not added a UPI ID yet. Message them to ask how to pay.</p>`}
+    <div class="kv"><div><span class="k">Amount</span><span class="v">${inr(toPay)}</span></div>${copyBtn(String(toPay / 100))}</div></div>
+    <form method="post" action="/o/${tok}/paid" class="pay-part" id="paid"><h2>Already paid?</h2><p class="muted">Tell ${esc(b.name)} so they can check it and mark it paid.</p>${err}
+    <label for="a">Amount you paid (₹)</label><input id="a" name="amount" type="number" inputmode="decimal" step="any" min="1" required value="${toPay / 100}">
+    <label for="r">UPI reference number</label><input id="r" name="upi_ref" required minlength="6" maxlength="30" placeholder="e.g. 4082 7391 5526" autocomplete="off" aria-describedby="r-hint"><p class="muted" id="r-hint" style="margin:6px 0 0">The 12-digit number your payment app shows under the payment.</p>
+    <button class="wide" style="margin-top:20px">I've paid</button></form>`;
+  res.send(payShell(b,
+    `<p class="pay-for">Hi ${first}, ${o.reported ? 'left to pay' : o.paid ? 'still to pay' : 'your total is'}</p>${bigAmount(toPay)}
+    <p class="pay-note">Order #${o.number} · due ${when(o.due_date)}</p>${o.reported ? `<p class="pay-note">${icon('clock')}${inr(o.reported)} you sent is waiting to be confirmed</p>` : ''}
+    ${b.upi_id ? `<a class="btn upi-app noprint" href="${esc(upiLink(b, o, toPay))}">${icon('phone')}Pay ${inr(toPay)} in a UPI app</a>` : ''}`,
+    `${reportedNote ? `<div class="pay-part" role="status"><p style="margin:0">${reportedNote}</p></div>` : ''}${order}${pay}`));
 }));
 app.post('/o/:token/paid', h(async (req, res) => {
   const r = await core.getByPublicToken(req.params.token); if (!r) return res.sendStatus(404);
   const ref = String(req.body.upi_ref || '').replace(/\s+/g, '');
   try {
-    if (!/^[A-Za-z0-9]{6,30}$/.test(ref)) throw new core.UserError('Enter the reference number from your payment app (letters and numbers only).');
-    if (r.order.state === 'cancelled') throw new core.UserError('This order was cancelled.');
+    if (!/^[A-Za-z0-9]{6,30}$/.test(ref)) throw new core.UserError('That UPI reference does not look right. Copy the 12-digit number from your payment app, letters and numbers only.');
+    if (r.order.state === 'cancelled') throw new core.UserError('This order was cancelled, so there is nothing to pay.');
     await core.recordPayment(r.business.id, r.order.number, { amount: req.body.amount, upi_ref: ref }, 'reported');
-    res.redirect(`/o/${req.params.token}`);
-  } catch (e) { if (e instanceof core.UserError) return res.redirect(`/o/${req.params.token}?err=${encodeURIComponent(e.message)}`); throw e; }
+    res.redirect(`/o/${req.params.token}?sent=1`);
+  } catch (e) { if (e instanceof core.UserError) return res.redirect(`/o/${req.params.token}?err=${encodeURIComponent(e.message)}#paid`); throw e; }
 }));
 app.get('/o/:token/receipt', h(async (req, res) => {
   const r = await core.getByPublicToken(req.params.token);
   if (!r || r.order.pay !== 'paid') return res.redirect(`/o/${req.params.token}`);
   const { order: o, business: b } = r;
-  const last = o.payments.filter(p => p.state === 'confirmed').map(p => p.paid_on).sort().pop();
-  res.send(page(`Receipt #${o.number}`, `<div class="pay-card">${b.logo ? `<img class="logo" src="${b.logo}" alt="">` : ''}<h1 style="margin-top:12px">${esc(b.name)}</h1><h2 style="margin-top:20px">Receipt for order #${o.number}</h2>
-    <p class="muted">${esc(o.customer)} · delivered ${when(o.due_date)}<br>Paid in full${last ? ' on ' + when(last) : ''}</p>${itemsList(o)}
-    ${o.payments.filter(p => p.state === 'confirmed').map(p => `<p class="muted" style="margin:2px 0">Received ${inr(p.amount_paise)} on ${when(p.paid_on)}${p.upi_ref ? ' · ref ' + esc(p.upi_ref) : ''}</p>`).join('')}
-    <p class="noprint" style="margin-top:24px"><button onclick="print()">Print or save as PDF</button></p></div>`));
+  const got = o.payments.filter(p => p.state === 'confirmed');
+  const last = got.map(p => p.paid_on).sort().pop();
+  res.send(page(`Receipt #${o.number} · ${b.name}`, `<main class="receipt"><div class="head"><div>${b.logo ? `<img class="logo" src="${b.logo}" alt="" style="margin-bottom:12px">` : ''}<h1>${esc(b.name)}</h1></div><span class="chip paid">Paid</span></div>
+    <h2>Receipt for order #${o.number}</h2>
+    <p class="muted">${esc(o.customer)} · due ${when(o.due_date)}<br>Paid in full${last ? ' on ' + when(last) : ''}</p>${itemsList(o)}
+    <div style="margin-top:20px">${got.map(p => `<p class="muted" style="margin:2px 0">Received ${inr(p.amount_paise)} on ${when(p.paid_on)}${p.upi_ref ? ' · ref <span class="mono">' + esc(p.upi_ref) + '</span>' : ''}</p>`).join('')}</div>
+    <div class="btns noprint" style="margin-top:28px"><button onclick="print()">${icon('print')}Print or save as PDF</button><a class="btn ghost" href="/o/${esc(req.params.token)}">Back to order</a></div></main>`, { bare: 'paybody' }));
 }));
 
 // ---- Claude connector + daily reminder

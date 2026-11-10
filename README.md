@@ -6,7 +6,8 @@ A back office for home bakers and made-to-order sellers who take orders in Whats
 
 - **Web app:** Today, Orders (click a name, date or status to edit), Order detail, Settings. Plain words, big buttons, works on a phone.
 - **Customer page** `/o/<link>`: amount due, UPI QR and ID with copy buttons, "I've paid" form, printable receipt. No login.
-- **Claude connector** `/mcp` with sign-in (OAuth): `list_orders`, `add_order`, `update_order`, `record_payment`, `import_orders`.
+- **Claude connector** `/mcp` with sign-in (OAuth): `list_orders`, `add_order`, `update_order`, `record_payment`, `import_orders`, plus costing: `save_recipe`, `add_expense`, `profit_summary`, `make_list`.
+- **Costing and margins:** recipe cost per item from ingredient pack prices, monthly overhead shared across orders by revenue, margin by item, and a make list with perishables flagged. Items without a recipe show "cost unknown", never zero.
 - **Team:** the owner invites emails in Settings → Team and ticks what each may do. The same permissions apply in the app and through Claude.
 - **Rules the app enforces:** same UPI reference cannot be counted twice; money a customer reports does not count until the seller confirms; totals and balances are computed, never typed; every business sees only its own data.
 
@@ -40,4 +41,4 @@ BASE=http://localhost:3000 npm test                                  # end-to-en
 - Sign-in is OAuth 2.1 with PKCE and dynamic client registration, built into the app (`lib/access.js`). Tokens are stored hashed; access tokens last an hour, refresh tokens 90 days. Removing a teammate cuts off their Claude straight away.
 - The old `/mcp/<private link>` addresses are switched off and answer with a message telling people to add `/mcp` and sign in.
 - Images (logo, QR) are stored in the database, so nothing is written to disk.
-- Later: recipes, ingredients, make-list, costing and margin, expenses.
+- Later: screens in the web app for recipes, expenses and profit (today they are reached through Claude).

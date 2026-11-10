@@ -46,7 +46,7 @@ const reuse = await fetch(At.token_endpoint, form({ grant_type: 'authorization_c
 assert.equal(reuse.status, 400); ok('sign-in code works only once');
 const { c, call } = await connect(At.access_token);
 const tools = (await c.listTools()).tools.map(t => t.name).sort();
-assert.deepEqual(tools, ['add_order', 'import_orders', 'list_orders', 'record_payment', 'update_order']); ok('connects over MCP, 5 tools listed');
+assert.deepEqual(tools, ['add_expense', 'add_order', 'import_orders', 'list_orders', 'make_list', 'profit_summary', 'record_payment', 'save_recipe', 'update_order']); ok('connects over MCP, owner sees all 9 tools');
 
 let r = await call('list_orders', {}); assert.match(r.t, /No orders/); ok('empty business says so plainly');
 r = await call('add_order', { customer: 'Priya', due_date: '2026-11-14', items: [{ name: 'Brownie box of 6', qty: 2, unit_price: 620 }], contact: '@priya' });
@@ -87,10 +87,64 @@ assert.equal(r.j.created.length, 3); assert.equal(r.j.skipped_duplicates.length,
 r = await call('import_orders', { orders }); assert.equal(r.j.created.length, 0, 'rerun is idempotent'); assert.equal(r.j.skipped_duplicates.length, 4); ok('re-running the same import creates nothing new');
 r = await call('list_orders', { due_from: '2026-11-20', due_to: '2026-11-21' }); assert.equal(r.j.length, 2); ok('date filter works');
 
+// ---- costing and margins, on a worked example in March 2027
+const mk = async (customer, due_date, items) => (await call('add_order', { customer, due_date, items })).j;
+const meera = await mk('Meera', '2027-03-05', [{ name: 'Brownie box of 6', qty: 2, unit_price: 620 }]);
+const kabir = await mk('Kabir', '2027-03-12', [{ name: 'cupcakes', qty: 12, unit_price: 90 }, { name: 'Gift card', qty: 1, unit_price: 200 }]);
+const zoya = await mk('Zoya', '2027-03-20', [{ name: 'Brownie box of 6', qty: 1, unit_price: 620 }]);
+await call('update_order', { order: zoya.order, state: 'cancelled' });
+r = await call('save_recipe', { name: 'Brownie box of 6', yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100 }] });
+assert.ok(r.err && /new ingredient/.test(r.t) && /unit \(g, ml or piece\), pack size, pack price/.test(r.t)); ok('new ingredient without pack details → asks for them, saves nothing');
+r = await call('save_recipe', { name: 'Brownie box of 6', yield_qty: 1, packaging_cost: 18, lines: [
+  { ingredient: 'Flour', qty: 100, unit: 'g', pack_size: 1000, pack_price: 60 }, { ingredient: 'Butter', qty: 100, unit: 'g', pack_size: 500, pack_price: 250 },
+  { ingredient: 'Cocoa', qty: 20, unit: 'g', pack_size: 100, pack_price: 100 }, { ingredient: 'Eggs', qty: 2, unit: 'piece', pack_size: 6, pack_price: 48 }] });
+assert.equal(r.j.batch_cost, 92); assert.equal(r.j.cost_per_item, 110); ok('recipe cost: (6+50+20+16)/1 + ₹18 packaging = ₹110 a box');
+r = await call('save_recipe', { name: 'Cupcakes', yield_qty: 12, packaging_cost: 3, lines: [{ ingredient: 'flour', qty: 200 }, { ingredient: 'Butter', qty: 120 }, { ingredient: 'Eggs', qty: 3 },
+  { ingredient: 'Cream', qty: 120, unit: 'ml', pack_size: 200, pack_price: 80, use_within_days_after_opening: 3 }] });
+assert.equal(r.j.batch_cost, 144); assert.equal(r.j.cost_per_item, 15); ok('ingredients reused by name; ₹144/12 + ₹3 = ₹15 a cupcake');
+r = await call('save_recipe', { name: 'Cupcakes', yield_qty: 12, lines: [{ ingredient: 'Butter', qty: 120, unit: 'ml' }] });
+assert.ok(r.err && /measured in g/.test(r.t)); ok('unit mismatch refused in plain English');
+r = await call('add_expense', { month: '2027-03', category: 'rent share', amount: 204, is_estimate: true });
+assert.ok(r.err && /how it was worked out/.test(r.t)); ok('estimate without a note is refused');
+r = await call('add_expense', { month: 'March', category: 'gas', amount: 300 }); assert.ok(r.err && /YYYY-MM/.test(r.t)); ok('bad month → plain error');
+await call('add_expense', { month: '2027-03', category: 'gas', amount: 300 });
+r = await call('add_expense', { month: '2027-03', category: 'rent share', amount: 204, is_estimate: true, note: '₹6,120 rent, kitchen is 1/30 of the flat' });
+assert.equal(r.j.month_expenses_total, 504); ok('expenses saved, month total ₹504');
+await call('record_payment', { order: meera.order, amount: 1240, upi_ref: 'MAR001' });
+await call('record_payment', { order: kabir.order, amount: 500, upi_ref: 'MAR002' });
+await fetch(kabir.customer_page.replace(/^https?:\/\/[^/]+/, B) + '/paid', form({ amount: '780', upi_ref: '777766665555' }));
+r = await call('profit_summary', { month: '2027-03' }); const P = r.j;
+assert.equal(P.orders, 2); assert.equal(P.revenue, 2520); assert.equal(P.cost, 400); assert.equal(P.overhead, 504); assert.equal(P.margin, 1616); assert.equal(P.margin_percent, 64.1);
+ok('margin maths: ₹2,520 revenue − ₹400 cost − ₹504 overhead = ₹1,616 (cancelled order left out)');
+const item = n => P.margin_by_item.find(i => i.item.toLowerCase() === n);
+assert.deepEqual([item('brownie box of 6').cost, item('brownie box of 6').overhead_share, item('brownie box of 6').margin], [220, 248, 772]);
+assert.deepEqual([item('cupcakes').cost, item('cupcakes').overhead_share, item('cupcakes').margin, item('cupcakes').cost_per_item], [180, 216, 684, 15]);
+ok('overhead shared by revenue: brownies ₹248, cupcakes ₹216; item margins ₹772 and ₹684');
+assert.equal(item('gift card').cost, 'cost unknown'); assert.equal(item('gift card').margin, 'cost unknown'); assert.equal(item('gift card').overhead_share, 40);
+assert.deepEqual(P.cost_unknown_for, ['Gift card']); assert.match(P.warning, /too high/); ok('item with no recipe shows "cost unknown", never zero, and the total is flagged');
+assert.deepEqual([P.collected, P.outstanding, P.reported_awaiting_confirmation], [1740, 780, 780]); ok('collected ₹1,740 vs outstanding ₹780; customer-reported ₹780 not counted');
+assert.ok(P.overhead_detail.find(e => e.category === 'rent share').estimate); ok('estimated expenses are marked with how they were estimated');
+r = await call('make_list', { due_from: '2027-03-01', due_to: '2027-03-31' });
+const need = n => r.j.ingredients.find(i => i.ingredient === n);
+assert.equal(r.j.open_orders, 2); assert.deepEqual([need('Flour').need, need('Butter').need, need('Cocoa').need, need('Eggs').need, need('Cream').need], [400, 320, 40, 7, 120]);
+assert.equal(need('Eggs').packs, 2); assert.deepEqual(r.j.perishables, ['Cream']); assert.equal(need('Cream').warning, undefined); assert.equal(r.j.no_recipe[0].item, 'Gift card');
+ok('make list: flour 400 g, butter 320 g, cocoa 40 g, 7 eggs (2 packs), cream 120 ml flagged perishable; gift card has no recipe');
+await mk('Ira', '2027-03-20', [{ name: 'Cupcakes', qty: 6, unit_price: 90 }]);
+r = await call('make_list', { due_from: '2027-03-01', due_to: '2027-03-31' });
+assert.equal(need('Cream').need, 180); assert.match(need('Cream').warning, /more than 3 days apart/); ok('cream needed 8 days apart → warns an opened pack will not last');
+r = await call('save_recipe', { name: 'Brownie box of 6', yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100, pack_price: 120 }, { ingredient: 'Butter', qty: 100 }, { ingredient: 'Cocoa', qty: 20 }, { ingredient: 'Eggs', qty: 2 }] });
+assert.equal(r.j.cost_per_item, 116); r = await call('save_recipe', { name: 'Cupcakes', yield_qty: 12, lines: [{ ingredient: 'Flour', qty: 200 }, { ingredient: 'Butter', qty: 120 }, { ingredient: 'Eggs', qty: 3 }, { ingredient: 'Cream', qty: 120 }] });
+assert.equal(r.j.cost_per_item, 16); ok('new flour price flows into every recipe (costs are computed, not stored); packaging kept');
+
 // isolation
 const z = await connect((await signIn(Z.cookie)).access_token);
 r = await z.call('list_orders', {}); assert.match(r.t, /No orders/); ok('second business sees none of the first business\'s orders');
 r = await z.call('update_order', { order: 1, state: 'cancelled' }); assert.ok(r.err); ok('second business cannot touch order #1');
+r = await z.call('profit_summary', { month: '2027-03' }); assert.match(r.t, /No orders due/); ok('second business sees none of the first business\'s profit');
+r = await z.call('make_list', { due_from: '2027-03-01', due_to: '2027-03-31' }); assert.match(r.t, /No open orders/); ok('second business gets an empty make list');
+r = await z.call('save_recipe', { name: 'Brownie box of 6', yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100 }] }); assert.ok(r.err && /new ingredient/.test(r.t)); ok('first business\'s ingredients are invisible to the second');
+await z.call('save_recipe', { name: 'Brownie box of 6', yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100, unit: 'g', pack_size: 1000, pack_price: 999 }] });
+r = await call('profit_summary', { month: '2027-03' }); assert.equal(r.j.margin_by_item.find(i => i.item === 'Brownie box of 6').cost_per_item, 116); ok('second business\'s same-named recipe does not change the first business\'s costs');
 const old = await fetch(B + '/mcp/not-a-real-token', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{}' }); assert.equal(old.status, 410); assert.match((await old.json()).error.message, /replaced by sign-in/); ok('old secret links are switched off with a plain message');
 assert.ok(await refused('made-up-token')); ok('made-up token refused');
 
@@ -111,6 +165,7 @@ r = await hc.call('list_orders', {}); assert.ok(r.j.length >= 1); ok('helper see
 r = await hc.call('add_order', { customer: 'Dev', due_date: '2026-12-01', items: [{ name: 'Cookie tin', qty: 1, unit_price: 450 }] }); assert.ok(!r.err); ok('helper can add an order');
 r = await hc.call('record_payment', { order: 1, amount: 10, upi_ref: 'HELPER123' }); assert.ok(r.err && /not allowed to use "Record and confirm payments"/.test(r.t)); ok('helper cannot record payments (plain-English refusal)');
 r = await hc.call('update_order', { order: 1, notes: 'x' }); assert.ok(r.err && /not allowed/.test(r.t)); ok('helper cannot change orders');
+r = await hc.call('profit_summary', { month: '2027-03' }); assert.ok(r.err && /See profit and margins/.test(r.t)); ok('helper cannot see profit unless the owner allows it');
 assert.equal((await fetch(B + '/orders/2/payments', form({ amount: 5 }, H.cookie))).status, 403); ok('web app applies the same rule (403)');
 assert.equal((await fetch(B + '/team/invite', form({ email: 'x@y.com' }, H.cookie))).status, 302); assert.ok(!(await (await fetch(B + '/settings', { headers: { cookie: A.cookie } })).text()).includes('x@y.com')); ok('helper cannot invite people');
 const mid = set.match(/action="\/team\/members\/(\d+)"/)?.[1] || (await (await fetch(B + '/settings', { headers: { cookie: A.cookie } })).text()).match(/action="\/team\/members\/(\d+)"/)[1];

@@ -106,6 +106,7 @@ const H = { cookie: jr.headers.get('set-cookie').split(';')[0] }; ok('helper joi
 assert.equal((await fetch(join)).status, 404); ok('invite link works only once');
 const Ht = await signIn(H.cookie); assert.ok(Ht.consent.includes('Not allowed for this email') && Ht.consent.includes('Record and confirm payments')); ok('helper consent screen lists what is not allowed');
 const hc = await connect(Ht.access_token);
+assert.deepEqual((await hc.c.listTools()).tools.map(t => t.name).sort(), ['add_order', 'list_orders']); ok('helper\'s Claude only lists the tools they may use');
 r = await hc.call('list_orders', {}); assert.ok(r.j.length >= 1); ok('helper sees the owner\'s orders through Claude');
 r = await hc.call('add_order', { customer: 'Dev', due_date: '2026-12-01', items: [{ name: 'Cookie tin', qty: 1, unit_price: 450 }] }); assert.ok(!r.err); ok('helper can add an order');
 r = await hc.call('record_payment', { order: 1, amount: 10, upi_ref: 'HELPER123' }); assert.ok(r.err && /not allowed to use "Record and confirm payments"/.test(r.t)); ok('helper cannot record payments (plain-English refusal)');

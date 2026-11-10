@@ -270,6 +270,59 @@ app.post('/products/import', authed, allow('save_products'), h(async (req, res) 
   res.redirect(`/products?${r.errors.length ? 'err=' + encodeURIComponent(`${msg}. Not saved: ${r.errors.map(e => e.problem).join(' ')}`) : 'ok=' + encodeURIComponent(msg + '.')}`);
 }));
 
+// ---- money: same core.profitSummary and expense functions as Claude's tools
+const monthName = m => new Date(m + '-01T00:00:00Z').toLocaleDateString('en-IN', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+const pctOf = (v, of) => of ? `${Math.round(v / of * 1000) / 10}%` : '–';
+const pickMonth = m => { try { return core.checkMonth(m); } catch { return core.today().slice(0, 7); } };
+const unknownWhy = (it, recipes) => it.has_product
+  ? `no recipe${recipes ? ` · <a href="/recipes/${it.product_id}">add one</a>` : ''}` : 'not a product';
+
+app.get('/money', authed, allow('profit_summary'), h(async (req, res) => {
+  const month = pickMonth(req.query.month), edit = can(req.user, 'add_expense'), recipes = can(req.user, 'save_recipe');
+  const p = await core.profitSummary(req.user.bid, month);
+  const head = `<div class="head"><div><h1>Money</h1><p class="muted">Orders due in ${monthName(month)}, cancelled ones left out.</p></div>
+    <form method="get" action="/money" class="monthpick"><label for="m" class="sr">Month to show</label><input type="month" id="m" name="month" value="${month}" data-autosubmit><button class="small ghost">Show</button></form></div>`;
+  const summary = !p.orders && !p.expenses.length
+    ? `<section class="sec empty"><h2>Nothing for ${monthName(month)} yet</h2><p>Orders due this month and its expenses show up here. Add an expense below, or tell Claude: "Gas this month was about ₹730, a ₹1,100 cylinder lasts six weeks."</p></section>`
+    : `<dl class="stats money"><div><dt>Revenue</dt><dd>${inr(p.revenue)}</dd></div><div><dt>Ingredient cost</dt><dd>${inr(Math.round(p.cost))}</dd></div><div><dt>Overhead</dt><dd>${inr(p.overhead)}</dd></div>
+      <div><dt>Margin</dt><dd>${inr(Math.round(p.margin))}</dd></div><div><dt>Margin %</dt><dd>${pctOf(p.margin, p.revenue)}</dd></div></dl>
+    ${p.cost_complete ? '' : `<div class="warn" role="note"><b>Margin is too high.</b> Cost unknown for ${p.unknown_cost_items.map(esc).join(', ')} (${inr(p.unknown_cost_revenue)} of sales), so their cost is left out. Add a recipe or ask Claude: "here is how I make the ${esc(p.unknown_cost_items[0])}".</div>`}
+    ${p.by_item.length ? `<section class="sec flush"><h2 class="inset">Margin by product</h2><table class="mtable"><thead><tr><th>Product</th><th class="num hide-sm">Sold</th><th class="num">Revenue</th><th class="num">Cost</th><th class="num hide-sm">Overhead</th><th class="num">Margin</th><th class="num hide-sm">Margin %</th></tr></thead><tbody>
+      ${p.by_item.map(it => `<tr><td>${esc(it.item)}${it.cost === null ? `<span class="muted sub">${unknownWhy(it, recipes)}</span>` : ''}</td><td class="num hide-sm">${it.qty}</td><td class="num" data-l="Revenue">${inr(it.revenue)}</td>
+        <td class="num" data-l="Cost">${it.cost === null ? '<span class="muted">cost unknown</span>' : inr(Math.round(it.cost))}</td><td class="num hide-sm">${inr(Math.round(it.overhead))}</td>
+        <td class="num" data-l="Margin">${it.margin === null ? '<span class="muted">unknown</span>' : `<b>${inr(Math.round(it.margin))}</b>`}</td><td class="num hide-sm">${it.margin === null ? '–' : pctOf(it.margin, it.revenue)}</td></tr>`).join('')}</tbody></table></section>` : ''}
+    <section class="sec"><h2>Collected and outstanding</h2><dl class="stats small"><div><dt>Collected</dt><dd>${inr(p.collected)}</dd></div><div><dt>Still to collect</dt><dd>${inr(p.outstanding)}</dd></div>
+      <div><dt>Customers say they paid</dt><dd>${inr(p.awaiting_confirmation)}</dd></div></dl>${p.awaiting_confirmation ? '<p class="muted" style="margin:8px 0 0">Not counted until you confirm it on <a href="/">Today</a>.</p>' : ''}</section>`;
+  const sv = e => edit ? `data-save="/expenses/${e.id}/field"` : 'disabled';
+  const expenses = `<section class="sec" id="expenses"><h2>Expenses in ${monthName(month)}</h2><p class="muted">Costs that are not ingredients, shared across the month's orders by revenue.</p>
+    ${p.expenses.length ? p.expenses.map(e => `<div class="exp"><div class="cat"><b>${esc(e.category)}</b>${e.is_estimate ? ' <span class="chip waiting">Estimated</span>' : ''}</div>
+      <div class="amt"><label class="sr" for="ea${e.id}">${esc(e.category)} amount in rupees</label><input id="ea${e.id}" name="amount" type="number" inputmode="decimal" step="any" min="1" value="${e.amount_paise / 100}" ${sv(e)}></div>
+      <div class="note"><label class="sr" for="en${e.id}">${esc(e.category)} note</label><input id="en${e.id}" name="note" value="${esc(e.note)}" placeholder="${e.is_estimate ? 'How it was estimated' : 'Note (optional)'}" ${sv(e)}></div>
+      ${edit ? `<form method="post" action="/expenses/${e.id}/delete" class="del"><button class="small ghost" aria-label="Delete ${esc(e.category)}">Delete</button></form>` : ''}</div>`).join('')
+    : `<p class="muted">No expenses for this month. Add gas, electricity or delivery below, or tell Claude: "electricity went up about ₹450 since I started baking".</p>`}
+    ${edit ? `<form method="post" action="/expenses/add" class="subform"><h3>Add an expense</h3><input type="hidden" name="month" value="${month}">
+      <div class="grid2"><div><label for="xc">Category</label><input id="xc" name="category" required placeholder="e.g. Gas" autocomplete="off"></div><div><label for="xa">Amount for the month (₹)</label><input id="xa" name="amount" type="number" inputmode="decimal" step="any" min="1" required></div></div>
+      <label for="xn">Note <span class="hint">(required for estimates: how you worked it out)</span></label><input id="xn" name="note" placeholder="e.g. ₹1,100 cylinder lasts about 6 weeks">
+      <label class="check"><input type="checkbox" name="is_estimate" value="1"><span><b>This is an estimate</b><span class="muted">Shown with an "Estimated" tag.</span></span></label>
+      <button style="margin-top:12px">${icon('plus')}Add expense</button><p class="muted" style="margin:10px 0 0">Adding a category that is already listed replaces its amount for this month.</p></form>` : ''}</section>`;
+  res.send(page('Money', head + summary + expenses, { user: req.user, nav: 'money', flash: { ok: req.query.ok, err: req.query.err } }));
+}));
+const toMoney = (res, month, k, m) => res.redirect(`/money?month=${encodeURIComponent(pickMonth(month))}&${k}=${encodeURIComponent(m)}#expenses`);
+app.post('/expenses/add', authed, allow('add_expense'), h(async (req, res) => {
+  try {
+    const r = await core.addExpense(req.user.bid, { month: req.body.month, category: req.body.category, amount: req.body.amount, note: req.body.note, is_estimate: !!req.body.is_estimate });
+    toMoney(res, r.month, 'ok', r.replaced ? `Replaced this month's ${r.category} with ${inr(r.amount_paise)}.` : `Added ${r.category}.`);
+  } catch (e) { if (!(e instanceof core.UserError)) throw e; toMoney(res, req.body.month, 'err', e.message); }
+}));
+app.post('/expenses/:id/field', authed, allow('add_expense'), h(async (req, res) => {
+  try { await core.updateExpense(req.user.bid, +req.params.id, req.body.field, req.body.value); res.json({ ok: true }); }
+  catch (e) { if (e instanceof core.UserError) return res.status(400).json({ error: e.message }); throw e; }
+}));
+app.post('/expenses/:id/delete', authed, allow('add_expense'), h(async (req, res) => {
+  try { const r = await core.removeExpense(req.user.bid, { id: +req.params.id }); toMoney(res, r.month, 'ok', `Deleted ${r.category} (${inr(r.amount_paise)}).`); }
+  catch (e) { if (!(e instanceof core.UserError)) throw e; res.redirect('/money?err=' + encodeURIComponent(e.message)); }
+}));
+
 // ---- settings and team
 const toolBoxes = (name, chosen, idp) => `<fieldset class="tools"><legend>What Claude and the app may do for this email</legend>${TOOLS.map(([t, l, d]) => `<label class="check"><input type="checkbox" name="${name}" value="${t}"${t === 'list_orders' ? ' checked disabled' : chosen.includes(t) ? ' checked' : ''}${idp ? ` id="${idp}-${t}"` : ''}><span><b>${l}</b><span class="muted">${d}</span></span></label>`).join('')}</fieldset>`;
 const toolNames = tools => cleanTools(tools).map(toolLabel).join(', ');

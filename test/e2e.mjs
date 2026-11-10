@@ -186,7 +186,12 @@ r = await call('remove_expense', { month: '2027-03', category: 'gas' }); assert.
 r = await call('remove_recipe', { product: 'cupcakes' }); assert.match(r.t, /Removed the recipe for Cupcakes/);
 r = await call('remove_recipe', { product: 'Cupcakes' }); assert.ok(r.err && /has no recipe/.test(r.t));
 r = await call('remove_recipe', { product: 'Croissant' }); assert.ok(r.err && /no product called "Croissant"/.test(r.t)); ok('remove_recipe: removed once, then plain errors');
-r = await call('profit_summary', { month: '2027-03' }); assert.equal(r.j.margin_by_item.find(i => i.item === 'Cupcakes').cost, 'cost unknown'); assert.equal(r.j.overhead, 204); ok('after removal cupcakes are cost unknown (not zero) and overhead is ₹204');
+r = await call('profit_summary', { month: '2027-03' }); assert.equal(r.j.margin_by_item.find(i => i.item === 'Cupcakes').cost, 'cost unknown'); assert.equal(r.j.overhead, 204);
+wr = await fetch(B + '/expenses/add', form({ month: '2027-03', category: 'Rent share', amount: '250', note: 'new flat share', is_estimate: '1' }, A.cookie));
+assert.match(decodeURIComponent(wr.headers.get('location')), /Replaced this month's rent share/); r = await call('profit_summary', { month: '2027-03' }); assert.equal(r.j.overhead, 250); ok('web Add expense uses the same replace rule (₹204 → ₹250)');
+let money = await (await fetch(B + '/money?month=2027-03', { headers: { cookie: A.cookie } })).text();
+assert.ok(money.includes('Estimated') && money.includes('new flat share') && money.includes('Margin by product')); const expId = money.match(/action="\/expenses\/(\d+)\/delete"/)[1]; ok('Money page shows the estimate tag with its note');
+assert.equal((await fetch(B + `/expenses/${expId}/field`, form({ field: 'note', value: '' }, A.cookie))).status, 400); ok('web edit: an estimate cannot lose its note'); ok('after removal cupcakes are cost unknown (not zero) and overhead is ₹204');
 
 // isolation
 const z = await connect((await signIn(Z.cookie)).access_token);
@@ -201,6 +206,9 @@ r = await z.call('save_recipe', { product: 'Brownie box of 6', price: 500, yield
 await z.call('save_recipe', { product: 'Brownie box of 6', price: 500, yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100, unit: 'g', pack_size: 1000, pack_price: 999 }] });
 r = await z.call('remove_expense', { month: '2027-03', category: 'rent share' }); assert.ok(r.err); ok('second business cannot remove the first business\'s expenses');
 r = await z.call('remove_recipe', { product: 'Brownie box of 6' }); assert.match(r.t, /Removed/);
+wr = await fetch(B + `/expenses/${expId}/delete`, form({}, Z.cookie)); assert.match(decodeURIComponent(wr.headers.get('location')), /not found/);
+r = await call('profit_summary', { month: '2027-03' }); assert.equal(r.j.overhead, 250); ok('web: second business cannot delete the first business\'s expense');
+assert.ok(!(await (await fetch(B + '/money?month=2027-03', { headers: { cookie: Z.cookie } })).text()).includes('new flat share')); ok('web: second business\'s Money page shows none of the first\'s');
 r = await call('profit_summary', { month: '2027-03' }); assert.equal(r.j.margin_by_item.find(i => i.item === 'Brownie box of 6').cost_per_item, 116); ok('second business\'s same-named recipe does not change the first business\'s costs');
 const old = await fetch(B + '/mcp/not-a-real-token', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{}' }); assert.equal(old.status, 410); assert.match((await old.json()).error.message, /replaced by sign-in/); ok('old secret links are switched off with a plain message');
 assert.ok(await refused('made-up-token')); ok('made-up token refused');

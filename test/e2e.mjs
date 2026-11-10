@@ -190,7 +190,7 @@ r = await call('profit_summary', { month: '2027-03' }); assert.equal(r.j.margin_
 wr = await fetch(B + '/expenses/add', form({ month: '2027-03', category: 'Rent share', amount: '250', note: 'new flat share', is_estimate: '1' }, A.cookie));
 assert.match(decodeURIComponent(wr.headers.get('location')), /Replaced this month's rent share/); r = await call('profit_summary', { month: '2027-03' }); assert.equal(r.j.overhead, 250); ok('web Add expense uses the same replace rule (₹204 → ₹250)');
 let money = await (await fetch(B + '/money?month=2027-03', { headers: { cookie: A.cookie } })).text();
-assert.ok(money.includes('Estimated') && money.includes('new flat share') && money.includes('Margin by product')); const expId = money.match(/action="\/expenses\/(\d+)\/delete"/)[1]; ok('Money page shows the estimate tag with its note');
+assert.ok(money.includes('Estimated') && money.includes('new flat share') && money.includes('By product')); const expId = money.match(/action="\/expenses\/(\d+)\/delete"/)[1]; ok('Money page shows the estimate tag with its note');
 assert.equal((await fetch(B + `/expenses/${expId}/field`, form({ field: 'note', value: '' }, A.cookie))).status, 400); ok('web edit: an estimate cannot lose its note'); ok('after removal cupcakes are cost unknown (not zero) and overhead is ₹204');
 
 // isolation
@@ -223,9 +223,28 @@ await call('save_recipe', { product: 'Cupcakes', yield_qty: 12, lines: [{ ingred
 let mkp = await (await fetch(B + '/make?from=2027-03-01&to=2027-03-31', { headers: { cookie: A.cookie } })).text();
 assert.ok(mkp.includes('Use soon after opening') && mkp.includes('Cream') && /For orders on .*Fri, 12 Mar/.test(mkp) && mkp.includes('Not counted: no recipe')); ok('web make list: perishables with the order dates they serve, and items with no recipe');
 mkp = await (await fetch(B + '/make?from=2027-03-31&to=2027-03-01', { headers: { cookie: A.cookie } })).text(); assert.ok(mkp.includes('is after due_to')); ok('web make list: reversed dates explained');
+
+// ---- ranges of months, product performance, order filters
+const marP = (await call('profit_summary', { month: '2027-03' })).j, aprP = (await call('profit_summary', { month: '2027-04' })).j;
+r = await call('profit_summary', { from_month: '2027-03', to_month: '2027-04' });
+assert.equal(r.j.by_month.length, 2); assert.equal(r.j.revenue, marP.revenue + aprP.revenue); assert.equal(r.j.overhead, marP.overhead + aprP.overhead);
+assert.equal(Math.round(r.j.margin * 100), Math.round((marP.margin + aprP.margin) * 100)); ok('profit_summary over March–April = March + April, with a month-by-month trend');
+const cupR = r.j.margin_by_item.find(i => i.item === 'Cupcakes'); assert.equal(cupR.qty, marP.margin_by_item.find(i => i.item === 'Cupcakes').qty + aprP.margin_by_item.find(i => i.item === 'Cupcakes').qty); assert.ok(cupR.share_of_revenue_percent > 0); ok('product totals add up across the range, with share of sales');
+r = await call('profit_summary', { from_month: '2027-05', to_month: '2027-03' }); assert.ok(r.err && /after the end month/.test(r.t)); ok('reversed range → plain error');
+let mr = await (await fetch(B + '/money?from=2027-03&to=2027-04', { headers: { cookie: A.cookie } })).text();
+assert.ok(mr.includes('Month by month') && mr.includes('By product') && mr.includes('Expenses by month') && mr.includes('March 2027 to April 2027')); ok('Money page shows a range: totals, month by month, by product, expenses by month');
+const cupLink = mr.match(/href="(\/money\?from=2027-03&(?:amp;)?to=2027-04&(?:amp;)?product=p\d+)#product">Cupcakes/)[1].replace(/&amp;/g, '&');
+mr = await (await fetch(B + cupLink, { headers: { cookie: A.cookie } })).text(); assert.ok(mr.includes('Cupcakes, month by month')); ok('click a product → its month-by-month performance');
+mr = await (await fetch(B + '/money?from=2020-01&to=2027-04', { headers: { cookie: A.cookie } })).text(); assert.ok(mr.includes('at most 24 months')); ok('too long a range is explained, page still shows');
+let ol = await (await fetch(B + '/orders?show=all&from=2027-04-01&to=2027-04-30', { headers: { cookie: A.cookie } })).text();
+assert.ok(ol.includes('value="Nisha"') && !ol.includes('value="Meera"') && ol.includes('orders due Thu, 1 Apr to Fri, 30 Apr') && ol.includes('still due')); ok('Orders filtered by due date (April only)');
+ol = await (await fetch(B + '/orders?show=all&q=nish', { headers: { cookie: A.cookie } })).text(); assert.ok(ol.includes('value="Nisha"') && !ol.includes('value="Om"')); ok('Orders filtered by customer name');
+ol = await (await fetch(B + '/orders?show=all&from=2027-04-30&to=2027-04-01', { headers: { cookie: A.cookie } })).text(); assert.ok(ol.includes('From date is after the To date')); ok('reversed order dates explained');
+ol = await (await fetch(B + '/orders?show=all&from=2030-01-01&to=2030-01-31', { headers: { cookie: A.cookie } })).text(); assert.ok(ol.includes('Clear filter')); ok('empty filter result says what to do next');
 wr = await fetch(B + `/expenses/${expId}/delete`, form({}, Z.cookie)); assert.match(decodeURIComponent(wr.headers.get('location')), /not found/);
 r = await call('profit_summary', { month: '2027-03' }); assert.equal(r.j.overhead, 250); ok('web: second business cannot delete the first business\'s expense');
-assert.ok(!(await (await fetch(B + '/money?month=2027-03', { headers: { cookie: Z.cookie } })).text()).includes('new flat share')); ok('web: second business\'s Money page shows none of the first\'s');
+assert.ok(!(await (await fetch(B + '/money?month=2027-03', { headers: { cookie: Z.cookie } })).text()).includes('new flat share'));
+assert.ok(!(await (await fetch(B + '/orders?show=all&q=nisha', { headers: { cookie: Z.cookie } })).text()).includes('Nisha')); r = await z.call('profit_summary', { from_month: '2027-03', to_month: '2027-04' }); assert.match(r.t, /No orders due/); ok('second business: filters and ranges show none of the first business\'s data'); ok('web: second business\'s Money page shows none of the first\'s');
 r = await call('profit_summary', { month: '2027-03' }); assert.equal(r.j.margin_by_item.find(i => i.item === 'Brownie box of 6').cost_per_item, 116); ok('second business\'s same-named recipe does not change the first business\'s costs');
 const old = await fetch(B + '/mcp/not-a-real-token', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{}' }); assert.equal(old.status, 410); assert.match((await old.json()).error.message, /replaced by sign-in/); ok('old secret links are switched off with a plain message');
 assert.ok(await refused('made-up-token')); ok('made-up token refused');

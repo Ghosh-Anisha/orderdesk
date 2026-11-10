@@ -129,20 +129,42 @@ const stateSelect = (o, attrs) => `<select name="state" ${attrs}>${[['open', 'Op
 
 app.get('/orders', authed, h(async (req, res) => {
   const show = req.query.show in VIEWS ? req.query.show : 'open';
-  const rows = await core.listOrders(req.user.bid);
-  const list = rows.filter(VIEWS[show]);
+  const t = core.today(), day = n => new Date(Date.parse(t) + n * 864e5).toISOString().slice(0, 10);
+  const mEnd = (y, m) => new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10), [ty, tm] = t.split('-').map(Number);
+  const presets = { overdue: ['Overdue', '', day(-1)], week: ['Next 7 days', t, day(6)], month: ['This month', t.slice(0, 8) + '01', mEnd(ty, tm)],
+    next: ['Next month', mEnd(ty, tm + 1).slice(0, 8) + '01', mEnd(ty, tm + 1)] };
+  const preset = presets[req.query.when];
+  let from = preset ? preset[1] : String(req.query.from || ''), to = preset ? preset[2] : String(req.query.to || ''), err;
+  const q = String(req.query.q || '').trim().slice(0, 60);
+  let rows;
+  try { rows = await core.listOrders(req.user.bid, { due_from: from || undefined, due_to: to || undefined, customer: q || undefined }); }
+  catch (e) { if (!(e instanceof core.UserError)) throw e; err = e.message; from = to = ''; rows = await core.listOrders(req.user.bid, { customer: q || undefined }); }
+  if (from && to && from > to) { err = 'The From date is after the To date. Swap them.'; }
+  const filtered = !!(from || to || q);
+  const viewShow = req.query.when === 'overdue' ? 'open' : show;
+  const list = rows.filter(VIEWS[viewShow]);
+  const keep = (extra) => { const u = new URLSearchParams({ show: viewShow, ...(from && { from }), ...(to && { to }), ...(q && { q }), ...extra }); return `/orders?${u}`; };
   const edit = can(req.user, 'update_order'), add = can(req.user, 'add_order');
   const sv = o => edit ? `data-save="/orders/${o.number}/field"` : 'disabled';
+  const range = from && to ? `due ${when(from)} to ${when(to)}` : from ? `due from ${when(from)}` : to ? `due by ${when(to)}` : '';
   const body = `<div class="head"><h1>Orders</h1>${add ? `<a class="btn" href="/orders/new">${icon('plus')}Add an order</a>` : ''}</div>
-  <nav class="tabs" aria-label="Show orders">${[['open', 'Open'], ['unpaid', 'Unpaid'], ['delivered', 'Delivered'], ['all', 'All']].map(([k, l]) => `<a href="/orders?show=${k}"${show === k ? ' aria-current="page"' : ''}>${l} <span class="n">${rows.filter(VIEWS[k]).length}</span></a>`).join('')}</nav>
-  ${list.length ? `<div class="sec flush"><table class="otable"><thead><tr><th>#</th><th>Customer</th><th>Due</th><th>Status</th><th class="num">Total</th><th>Payment</th></tr></thead><tbody>
+  <form method="get" action="/orders" class="sec range filters"><input type="hidden" name="show" value="${viewShow}">
+    <div><label for="ff">Due from</label><input id="ff" type="date" name="from" value="${esc(from)}"></div><div><label for="ft">Due to</label><input id="ft" type="date" name="to" value="${esc(to)}"></div>
+    <div><label for="fq">Customer</label><input id="fq" type="search" name="q" value="${esc(q)}" placeholder="Name" autocomplete="off"></div>
+    <div class="btns"><button class="small">Filter</button>${filtered ? `<a class="btn small ghost" href="/orders?show=${viewShow}">Clear</a>` : ''}</div>
+    <nav class="presets" aria-label="Quick dates">${Object.entries(presets).map(([k, [l, f, tt]]) => `<a class="chip-link" href="/orders?${new URLSearchParams({ show: k === 'overdue' ? 'open' : viewShow, when: k, ...(q && { q }) })}"${from === f && to === tt ? ' aria-current="true"' : ''}>${l}</a>`).join('')}</nav></form>
+  ${err ? `<div class="err" role="alert">${esc(err)}</div>` : ''}
+  <nav class="tabs" aria-label="Show orders">${[['open', 'Open'], ['unpaid', 'Unpaid'], ['delivered', 'Delivered'], ['all', 'All']].map(([k, l]) => `<a href="${keep({ show: k })}"${viewShow === k ? ' aria-current="page"' : ''}>${l} <span class="n">${rows.filter(VIEWS[k]).length}</span></a>`).join('')}</nav>
+  ${list.length ? `<p class="muted">${list.length} order${list.length === 1 ? '' : 's'}${range ? ' ' + range : ''}${q ? ` for “${esc(q)}”` : ''} · ${inr(list.reduce((s, o) => s + o.total, 0))} in all · ${inr(list.reduce((s, o) => s + o.balance, 0))} still due</p>
+  <div class="sec flush"><table class="otable"><thead><tr><th>#</th><th>Customer</th><th>Due</th><th>Status</th><th class="num">Total</th><th>Payment</th></tr></thead><tbody>
   ${list.map(o => `<tr><td class="c-no"><a href="/orders/${o.number}" aria-label="Open order ${o.number}">#${o.number}</a></td>
   <td class="c-name"><input name="customer" value="${esc(o.customer)}" aria-label="Customer, order ${o.number}" ${sv(o)}></td>
   <td class="c-due"><input type="date" name="due_date" value="${o.due_date}" aria-label="Due date, order ${o.number}" ${sv(o)}></td>
   <td class="c-state">${stateSelect(o, `aria-label="Status, order ${o.number}" ${sv(o)}`)}</td>
   <td class="c-total num">${inr(o.total)}</td><td class="c-pay">${chip(o.pay)}${o.balance && o.paid ? `<span class="muted left">${inr(o.balance)} left</span>` : ''}</td></tr>`).join('')}</tbody></table></div>
   ${edit ? '<p class="muted">Change a name, date or status right in the list. It saves by itself.</p>' : ''}`
-    : `<div class="sec empty"><h2>${rows.length ? `No ${show === 'all' ? '' : show + ' '}orders` : 'No orders yet'}</h2><p>${rows.length ? 'Try another view above, or add a new order.' : 'Add an order, or connect Claude and ask it to bring orders in from your DMs or a sheet.'}</p><div class="btns">${add ? `<a class="btn" href="/orders/new">${icon('plus')}Add an order</a>` : ''}${rows.length ? '' : '<a class="btn ghost" href="/settings#claude">Connect Claude</a>'}</div></div>`}`;
+    : filtered ? `<div class="sec empty"><h2>No ${viewShow === 'all' ? '' : viewShow + ' '}orders ${range || ''}${q ? ` for “${esc(q)}”` : ''}</h2><p>Try other dates, another tab, or clear the filter.</p><div class="btns"><a class="btn ghost" href="/orders?show=${viewShow}">Clear filter</a></div></div>`
+    : `<div class="sec empty"><h2>${rows.length ? `No ${viewShow === 'all' ? '' : viewShow + ' '}orders` : 'No orders yet'}</h2><p>${rows.length ? 'Try another view above, or add a new order.' : 'Add an order, or connect Claude and ask it to bring orders in from your DMs or a sheet.'}</p><div class="btns">${add ? `<a class="btn" href="/orders/new">${icon('plus')}Add an order</a>` : ''}${rows.length ? '' : '<a class="btn ghost" href="/settings#claude">Connect Claude</a>'}</div></div>`}`;
   res.send(page('Orders', body, { user: req.user, nav: 'orders' }));
 }));
 
@@ -273,41 +295,63 @@ app.post('/products/import', authed, allow('save_products'), h(async (req, res) 
 // ---- money: same core.profitSummary and expense functions as Claude's tools
 const monthName = m => new Date(m + '-01T00:00:00Z').toLocaleDateString('en-IN', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 const pctOf = (v, of) => of ? `${Math.round(v / of * 1000) / 10}%` : '–';
+const addMonths = (m, n) => { const [y, mo] = m.split('-').map(Number), d = new Date(Date.UTC(y, mo - 1 + n, 1)); return d.toISOString().slice(0, 7); };
 const pickMonth = m => { try { return core.checkMonth(m); } catch { return core.today().slice(0, 7); } };
 const unknownWhy = (it, recipes) => it.has_product
   ? `no recipe${recipes ? ` · <a href="/recipes/${it.product_id}">add one</a>` : ''}` : 'not a product';
 
 app.get('/money', authed, allow('profit_summary'), h(async (req, res) => {
-  const month = pickMonth(req.query.month), edit = can(req.user, 'add_expense'), recipes = can(req.user, 'save_recipe');
-  const p = await core.profitSummary(req.user.bid, month);
-  const head = `<div class="head"><div><h1>Money</h1><p class="muted">Orders due in ${monthName(month)}, cancelled ones left out.</p></div>
-    <form method="get" action="/money" class="monthpick"><label for="m" class="sr">Month to show</label><input type="month" id="m" name="month" value="${month}" data-autosubmit><button class="small ghost">Show</button></form></div>`;
-  const summary = !p.orders && !p.expenses.length
-    ? `<section class="sec empty"><h2>Nothing for ${monthName(month)} yet</h2><p>Orders due this month and its expenses show up here. Add an expense below, or tell Claude: "Gas this month was about ₹730, a ₹1,100 cylinder lasts six weeks."</p></section>`
+  const now = core.today().slice(0, 7);
+  let from = pickMonth(req.query.from || req.query.month), to = pickMonth(req.query.to || req.query.month || from);
+  if (from > to) [from, to] = [to, from];
+  let p, rangeErr;
+  try { p = await core.profitRange(req.user.bid, from, to); } catch (e) { if (!(e instanceof core.UserError)) throw e; rangeErr = e.message; from = to = now; p = await core.profitRange(req.user.bid, now, now); }
+  const single = from === to, edit = can(req.user, 'add_expense'), recipes = can(req.user, 'save_recipe');
+  const label = single ? monthName(from) : `${monthName(from)} to ${monthName(to)}`;
+  const q = (f, t, extra = '') => `/money?from=${f}&to=${t}${extra}`;
+  const fy = (() => { const [y, m] = now.split('-').map(Number); return `${m >= 4 ? y : y - 1}-04`; })();
+  const presets = [['This month', now, now], ['Last month', addMonths(now, -1), addMonths(now, -1)], ['Last 3 months', addMonths(now, -2), now], ['This financial year', fy, now], ['Last 12 months', addMonths(now, -11), now]];
+  const head = `<div class="head"><div><h1>Money</h1><p class="muted">Orders due in ${label}, cancelled ones left out.</p></div></div>
+    <form method="get" action="/money" class="sec range"><div><label for="mf">From</label><input type="month" id="mf" name="from" value="${from}"></div><div><label for="mt">To</label><input type="month" id="mt" name="to" value="${to}"></div><button class="small">Show</button>
+    <nav class="presets" aria-label="Quick ranges">${presets.map(([l, f, t]) => `<a class="chip-link" href="${q(f, t)}"${f === from && t === to ? ' aria-current="true"' : ''}>${l}</a>`).join('')}</nav></form>
+    ${rangeErr ? `<div class="err" role="alert">${esc(rangeErr)} Showing this month instead.</div>` : ''}`;
+  const hasExp = p.months.some(m => m.expenses.length);
+  const pick = req.query.product && p.by_item.find(it => it.product_id && `p${it.product_id}` === req.query.product);
+  const money = (x, rev) => `<td class="num" data-l="Revenue">${inr(x.revenue)}</td>${rev !== undefined ? `<td class="num hide-sm">${pctOf(x.revenue, rev)}</td>` : ''}<td class="num" data-l="Cost">${x.cost === null ? '<span class="muted">cost unknown</span>' : inr(Math.round(x.cost))}</td>
+    <td class="num hide-sm">${inr(Math.round(x.overhead))}</td><td class="num" data-l="Margin">${x.margin === null ? '<span class="muted">unknown</span>' : `<b>${inr(Math.round(x.margin))}</b>`}</td><td class="num hide-sm">${x.margin === null ? '–' : pctOf(x.margin, x.revenue)}</td></tr>`;
+  const body = !p.orders && !hasExp
+    ? `<section class="sec empty"><h2>Nothing for ${label} yet</h2><p>Orders due in these months and their expenses show up here. ${single ? 'Add an expense below, or tell' : 'Pick other months, or tell'} Claude: "Gas this month was about ₹730, a ₹1,100 cylinder lasts six weeks."</p></section>`
     : `<dl class="stats money"><div><dt>Revenue</dt><dd>${inr(p.revenue)}</dd></div><div><dt>Ingredient cost</dt><dd>${inr(Math.round(p.cost))}</dd></div><div><dt>Overhead</dt><dd>${inr(p.overhead)}</dd></div>
-      <div><dt>Margin</dt><dd>${inr(Math.round(p.margin))}</dd></div><div><dt>Margin %</dt><dd>${pctOf(p.margin, p.revenue)}</dd></div></dl>
+      <div><dt>Margin</dt><dd>${inr(Math.round(p.margin))}</dd></div><div><dt>Margin %</dt><dd>${pctOf(p.margin, p.revenue)}</dd></div><div><dt>Orders</dt><dd>${p.orders}</dd></div></dl>
     ${p.cost_complete ? '' : `<div class="warn" role="note"><b>Margin is too high.</b> Cost unknown for ${p.unknown_cost_items.map(esc).join(', ')} (${inr(p.unknown_cost_revenue)} of sales), so their cost is left out. Add a recipe or ask Claude: "here is how I make the ${esc(p.unknown_cost_items[0])}".</div>`}
-    ${p.by_item.length ? `<section class="sec flush"><h2 class="inset">Margin by product</h2><table class="mtable"><thead><tr><th>Product</th><th class="num hide-sm">Sold</th><th class="num">Revenue</th><th class="num">Cost</th><th class="num hide-sm">Overhead</th><th class="num">Margin</th><th class="num hide-sm">Margin %</th></tr></thead><tbody>
-      ${p.by_item.map(it => `<tr><td>${esc(it.item)}${it.cost === null ? `<span class="muted sub">${unknownWhy(it, recipes)}</span>` : ''}</td><td class="num hide-sm">${it.qty}</td><td class="num" data-l="Revenue">${inr(it.revenue)}</td>
-        <td class="num" data-l="Cost">${it.cost === null ? '<span class="muted">cost unknown</span>' : inr(Math.round(it.cost))}</td><td class="num hide-sm">${inr(Math.round(it.overhead))}</td>
-        <td class="num" data-l="Margin">${it.margin === null ? '<span class="muted">unknown</span>' : `<b>${inr(Math.round(it.margin))}</b>`}</td><td class="num hide-sm">${it.margin === null ? '–' : pctOf(it.margin, it.revenue)}</td></tr>`).join('')}</tbody></table></section>` : ''}
+    ${pick ? `<section class="sec flush" id="product"><h2 class="inset">${esc(pick.item)}, month by month</h2><p class="muted inset">${pick.qty} sold, ${inr(pick.revenue)} of sales (${pctOf(pick.revenue, p.revenue)} of all sales). <a href="${q(from, to)}#products">All products</a></p>
+      <table class="mtable"><thead><tr><th>Month</th><th class="num hide-sm">Sold</th><th class="num">Revenue</th><th class="num">Cost</th><th class="num hide-sm">Overhead</th><th class="num">Margin</th><th class="num hide-sm">Margin %</th></tr></thead><tbody>
+      ${pick.months.map(m => `<tr><td><a href="${q(m.month, m.month)}">${monthName(m.month)}</a></td><td class="num hide-sm">${m.qty}</td>${money(m)}`).join('')}</tbody></table></section>` : ''}
+    ${single ? '' : `<section class="sec flush"><h2 class="inset">Month by month</h2><table class="mtable"><thead><tr><th>Month</th><th class="num hide-sm">Orders</th><th class="num">Revenue</th><th class="num">Cost</th><th class="num hide-sm">Overhead</th><th class="num">Margin</th><th class="num hide-sm">Margin %</th></tr></thead><tbody>
+      ${p.months.map(m => `<tr><td><a href="${q(m.month, m.month)}">${monthName(m.month)}</a>${m.cost_complete ? '' : '<span class="muted sub">some costs unknown</span>'}</td><td class="num hide-sm">${m.orders}</td>${money(m)}`).join('')}</tbody></table></section>`}
+    ${p.by_item.length ? `<section class="sec flush" id="products"><h2 class="inset">By product</h2><table class="mtable"><thead><tr><th>Product</th><th class="num hide-sm">Sold</th><th class="num">Revenue</th><th class="num hide-sm">Share</th><th class="num">Cost</th><th class="num hide-sm">Overhead</th><th class="num">Margin</th><th class="num hide-sm">Margin %</th></tr></thead><tbody>
+      ${p.by_item.map(it => `<tr><td>${it.product_id ? `<a href="${q(from, to, `&product=p${it.product_id}`)}#product">${esc(it.item)}</a>` : esc(it.item)}${it.cost === null ? `<span class="muted sub">${unknownWhy(it, recipes)}</span>` : ''}</td><td class="num hide-sm">${it.qty}</td>${money(it, p.revenue)}`).join('')}</tbody></table>
+      ${single ? '' : '<p class="muted inset" style="padding-bottom:12px">Click a product to see it month by month.</p>'}</section>` : ''}
     <section class="sec"><h2>Collected and outstanding</h2><dl class="stats small"><div><dt>Collected</dt><dd>${inr(p.collected)}</dd></div><div><dt>Still to collect</dt><dd>${inr(p.outstanding)}</dd></div>
       <div><dt>Customers say they paid</dt><dd>${inr(p.awaiting_confirmation)}</dd></div></dl>${p.awaiting_confirmation ? '<p class="muted" style="margin:8px 0 0">Not counted until you confirm it on <a href="/">Today</a>.</p>' : ''}</section>`;
   const sv = e => edit ? `data-save="/expenses/${e.id}/field"` : 'disabled';
-  const expenses = `<section class="sec" id="expenses"><h2>Expenses in ${monthName(month)}</h2><p class="muted">Costs that are not ingredients, shared across the month's orders by revenue.</p>
-    ${p.expenses.length ? p.expenses.map(e => `<div class="exp"><div class="cat"><b>${esc(e.category)}</b>${e.is_estimate ? ' <span class="chip waiting">Estimated</span>' : ''}</div>
+  const one = p.months[0];
+  const expenses = single ? `<section class="sec" id="expenses"><h2>Expenses in ${monthName(from)}</h2><p class="muted">Costs that are not ingredients, shared across the month's orders by revenue.</p>
+    ${one.expenses.length ? one.expenses.map(e => `<div class="exp"><div class="cat"><b>${esc(e.category)}</b>${e.is_estimate ? ' <span class="chip waiting">Estimated</span>' : ''}</div>
       <div class="amt"><label class="sr" for="ea${e.id}">${esc(e.category)} amount in rupees</label><input id="ea${e.id}" name="amount" type="number" inputmode="decimal" step="any" min="1" value="${e.amount_paise / 100}" ${sv(e)}></div>
       <div class="note"><label class="sr" for="en${e.id}">${esc(e.category)} note</label><input id="en${e.id}" name="note" value="${esc(e.note)}" placeholder="${e.is_estimate ? 'How it was estimated' : 'Note (optional)'}" ${sv(e)}></div>
       ${edit ? `<form method="post" action="/expenses/${e.id}/delete" class="del"><button class="small ghost" aria-label="Delete ${esc(e.category)}">Delete</button></form>` : ''}</div>`).join('')
     : `<p class="muted">No expenses for this month. Add gas, electricity or delivery below, or tell Claude: "electricity went up about ₹450 since I started baking".</p>`}
-    ${edit ? `<form method="post" action="/expenses/add" class="subform"><h3>Add an expense</h3><input type="hidden" name="month" value="${month}">
+    ${edit ? `<form method="post" action="/expenses/add" class="subform"><h3>Add an expense</h3><input type="hidden" name="month" value="${from}">
       <div class="grid2"><div><label for="xc">Category</label><input id="xc" name="category" required placeholder="e.g. Gas" autocomplete="off"></div><div><label for="xa">Amount for the month (₹)</label><input id="xa" name="amount" type="number" inputmode="decimal" step="any" min="1" required></div></div>
       <label for="xn">Note <span class="hint">(required for estimates: how you worked it out)</span></label><input id="xn" name="note" placeholder="e.g. ₹1,100 cylinder lasts about 6 weeks">
       <label class="check"><input type="checkbox" name="is_estimate" value="1"><span><b>This is an estimate</b><span class="muted">Shown with an "Estimated" tag.</span></span></label>
-      <button style="margin-top:12px">${icon('plus')}Add expense</button><p class="muted" style="margin:10px 0 0">Adding a category that is already listed replaces its amount for this month.</p></form>` : ''}</section>`;
-  res.send(page('Money', head + summary + expenses, { user: req.user, nav: 'money', flash: { ok: req.query.ok, err: req.query.err } }));
+      <button style="margin-top:12px">${icon('plus')}Add expense</button><p class="muted" style="margin:10px 0 0">Adding a category that is already listed replaces its amount for this month.</p></form>` : ''}</section>`
+    : `<section class="sec" id="expenses"><h2>Expenses by month</h2><p class="muted">Open a month to add, change or delete its expenses.</p>
+      ${p.months.map(m => `<div class="row"><div><a href="${q(m.month, m.month)}#expenses"><b>${monthName(m.month)}</b></a> <span class="muted">· ${m.expenses.length ? `${m.expenses.length} expense${m.expenses.length === 1 ? '' : 's'}${m.expenses.some(e => e.is_estimate) ? ', some estimated' : ''}` : 'none recorded'}</span></div><b class="num">${inr(m.overhead)}</b></div>`).join('')}</section>`;
+  res.send(page('Money', head + body + expenses, { user: req.user, nav: 'money', flash: { ok: req.query.ok, err: req.query.err } }));
 }));
-const toMoney = (res, month, k, m) => res.redirect(`/money?month=${encodeURIComponent(pickMonth(month))}&${k}=${encodeURIComponent(m)}#expenses`);
+const toMoney = (res, month, k, m) => { const mo = pickMonth(month); res.redirect(`/money?from=${mo}&to=${mo}&${k}=${encodeURIComponent(m)}#expenses`); };
 app.post('/expenses/add', authed, allow('add_expense'), h(async (req, res) => {
   try {
     const r = await core.addExpense(req.user.bid, { month: req.body.month, category: req.body.category, amount: req.body.amount, note: req.body.note, is_estimate: !!req.body.is_estimate });

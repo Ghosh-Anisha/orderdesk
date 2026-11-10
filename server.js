@@ -38,10 +38,9 @@ const authed = h(async (req, res, next) => {
   if (!req.user) return res.redirect('/login');
   next();
 });
-const authForm = (title, action, fields, foot, err) => page(title, `<div style="max-width:420px;margin:48px auto"><h1>${title}</h1>
-<p class="muted" style="margin:.5rem 0 0">Orders, payments and a page your customers can pay from. Claude does the typing.</p>
-<form method="post" action="${action}" class="sec" style="margin-top:20px">${fields}<button style="width:100%;margin-top:18px">${title}</button></form><p>${foot}</p></div>`, { flash: { err } });
-
+const authForm = (title, action, fields, foot, err) => page(title, `<div class="auth"><p class="auth-brand">Orderly</p><h1>${title}</h1>
+<p class="muted">Orders, payments and a page your customers can pay from. Claude does the typing.</p>
+${err ? `<div class="err" role="alert">${esc(err)}</div>` : ''}<form method="post" action="${action}" class="sec">${fields}<button class="wide" style="margin-top:20px">${title}</button></form><p>${foot}</p></div>`);
 app.get('/signup', (req, res) => res.send(authForm('Create account', '/signup',
   `<label for="n">Business name</label><input id="n" name="name" required placeholder="e.g. Kudough"><label for="e">Email</label><input id="e" type="email" name="email" required><label for="p">Password (8 or more characters)</label><input id="p" type="password" name="password" minlength="8" required>`,
   'Have an account? <a href="/login">Log in</a>')));
@@ -197,18 +196,20 @@ app.get('/orders/:n', authed, h(async (req, res) => {
 // ---- settings
 app.get('/settings', authed, h(async (req, res) => {
   const u = req.user, url = `${base(req)}/mcp/${u.mcp_token}`;
-  const body = `<h1>Settings</h1>${req.query.welcome ? '<p class="okmsg" style="margin-top:14px">Account created. Add your UPI details below, then connect Claude.</p>' : ''}
-  <form method="post" action="/settings" class="sec" style="margin-top:16px"><h2>Your business</h2>
+  const img = (id, src, cls, alt) => src ? `<img id="${id}_p" class="${cls}" src="${src}" alt="${alt}" style="margin-top:10px">` : '';
+  const body = `<div class="head"><h1>Settings</h1></div>${req.query.welcome ? '<div class="okmsg" role="status">Account created. Add your UPI details below, then connect Claude.</div>' : ''}
+  <div class="split"><form method="post" action="/settings" class="sec"><h2>Your business</h2>
   <label for="bn">Business name</label><input id="bn" name="name" value="${esc(u.biz_name)}" required>
-  <label for="up">UPI ID customers pay to</label><input id="up" name="upi_id" value="${esc(u.upi_id)}" placeholder="name@bank" autocapitalize="off">
-  <label for="lg">Logo (optional)</label><input id="lg" type="file" accept="image/*" data-img="400" data-target="logo"><input type="hidden" id="logo" name="logo"><img id="logo_p" class="logo" ${u.logo ? `src="${u.logo}"` : 'hidden'} alt="Logo" style="margin-top:8px">
-  <label for="qrf">Your UPI QR code (optional, screenshot from your UPI app)</label><input id="qrf" type="file" accept="image/*" data-img="700" data-target="qr"><input type="hidden" id="qr" name="qr"><img id="qr_p" class="qr" style="margin-left:0" ${u.qr ? `src="${u.qr}"` : 'hidden'} alt="UPI QR">
-  <button style="margin-top:18px">Save settings</button></form>
-  <div class="sec"><h2>Connect Claude</h2><p class="muted" style="margin-top:0">Once connected, you can tell Claude "add an order for Priya, 12 brownies, Saturday" or drop in a sheet or screenshot of DMs and it fills this app for you.</p>
+  <label for="up">UPI ID customers pay to</label><input id="up" name="upi_id" value="${esc(u.upi_id)}" placeholder="name@bank" autocapitalize="off" autocomplete="off" spellcheck="false">
+  ${u.upi_id ? '' : '<p class="muted" style="margin:6px 0 0">Without a UPI ID, customers see a note asking them to message you.</p>'}
+  <label for="qrf">UPI QR code <span class="hint">(optional, a screenshot from your UPI app)</span></label><input id="qrf" type="file" accept="image/*" data-img="700" data-target="qr" data-cls="qr"><input type="hidden" id="qr" name="qr">${img('qr', u.qr, 'qr', 'Your UPI QR code')}
+  <label for="lg">Logo <span class="hint">(optional)</span></label><input id="lg" type="file" accept="image/*" data-img="400" data-target="logo" data-cls="logo"><input type="hidden" id="logo" name="logo">${img('logo', u.logo, 'logo', 'Your logo')}
+  <div class="formfoot"><button>Save settings</button></div></form>
+  <section class="sec" id="claude"><h2>Connect Claude</h2><p class="muted">Then you can tell Claude "add an order for Priya, 12 brownies, Saturday", or drop in a sheet or a screenshot of your DMs, and it fills this app for you.</p>
   <ol class="steps"><li>Copy your private link below.</li><li>In Claude, open <b>Customize → Connectors → + → Add custom connector</b>.</li><li>Name it <b>${esc(u.biz_name)}</b>, paste the link, choose <b>No sign in</b>, and add it.</li><li>Open a new chat and say "show my orders".</li></ol>
   <div class="copy"><input readonly value="${esc(url)}" aria-label="Private Claude link">${copyBtn(url)}</div>
-  <p class="muted">Anyone with this link can read and change your orders, so keep it private.</p>
-  <form method="post" action="/settings/reset-link"><button class="small ghost">Make a new link</button> <span class="muted">The old one stops working.</span></form></div>`;
+  <p class="muted" style="margin-top:10px">Anyone with this link can read and change your orders, so keep it private.</p>
+  <form method="post" action="/settings/reset-link" class="subform"><h3>Link shared by mistake?</h3><p class="muted">Make a new link. The old one stops working, so paste the new one into Claude.</p><button class="small ghost">Make a new link</button></form></section></div>`;
   res.send(page('Settings', body, { user: u, nav: 'settings', flash: { ok: req.query.ok } }));
 }));
 app.post('/settings', authed, h(async (req, res) => {
@@ -313,7 +314,7 @@ app.get('/cron/reminders', h(async (req, res) => {
   res.json({ ok: true, sent });
 }));
 
-app.use((err, req, res, next) => { console.error(err); res.status(500).send(page('Error', '<div class="sec empty" style="margin-top:40px"><h2>Something went wrong</h2><p>Try again. If it keeps happening, tell the person who set this up.</p><a class="btn" href="/">Go home</a></div>')); });
+app.use((err, req, res, next) => { console.error(err); res.status(500).send(page('Something went wrong', '<div class="sec empty" style="margin-top:40px"><h1>Something went wrong on our side</h1><p>Your last change may not have saved. Go back and try again. If it keeps happening, tell the person who set this up.</p><div class="btns"><a class="btn" href="/">Go to Today</a></div></div>')); });
 
 if (!process.env.VERCEL) app.listen(process.env.PORT || 3000, () => console.log('Orderly on :' + (process.env.PORT || 3000)));
 export default app;

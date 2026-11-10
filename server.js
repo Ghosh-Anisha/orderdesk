@@ -32,6 +32,7 @@ async function loadUser(req) {
   const [uid, sig] = sid.split('.');
   if (!sig || sign(uid) !== sig) return null;
   const r = await q('SELECT u.id, u.email, u.role, u.tools, b.id AS bid, b.name AS biz_name, b.upi_id, b.logo, b.qr FROM users u JOIN businesses b ON b.id=u.business_id WHERE u.id=$1', [uid]);
+  if (r.rows[0]) await core.ensureCatalogue(r.rows[0].bid);
   return r.rows[0] || null;
 }
 const authed = h(async (req, res, next) => {
@@ -106,8 +107,8 @@ app.get('/', authed, h(async (req, res) => {
 }));
 
 // ---- orders
-const itemRows = items => (items.length ? items : [{ name: '', qty: 1, unit_paise: 0 }]).map(i => `<tr><td class="c-item"><input name="iname" value="${esc(i.name)}" placeholder="e.g. Brownie box of 6" aria-label="Item"></td>
-<td class="c-qty"><input name="iqty" type="number" inputmode="decimal" step="any" min="0" value="${i.qty}" aria-label="Quantity"></td><td class="c-price"><input name="iprice" type="number" inputmode="decimal" step="any" min="0" value="${i.unit_paise ? i.unit_paise / 100 : ''}" placeholder="₹ each" aria-label="Price each in rupees"></td></tr>`).join('');
+const itemRows = items => (items.length ? items : [{ name: '', qty: 1, unit_paise: null }]).map(i => `<tr><td class="c-item"><input name="iname" value="${esc(i.name)}" placeholder="e.g. Brownie box of 6" aria-label="Item"></td>
+<td class="c-qty"><input name="iqty" type="number" inputmode="decimal" step="any" min="0" value="${i.qty}" aria-label="Quantity"></td><td class="c-price"><input name="iprice" type="number" inputmode="decimal" step="any" min="0" value="${i.name && i.unit_paise != null ? i.unit_paise / 100 : ''}" placeholder="from products" aria-label="Price each in rupees"></td></tr>`).join('');
 const itemsTable = items => `<table id="items" class="itable"><thead><tr><th>Item</th><th>Qty</th><th>Price each (₹)</th></tr></thead><tbody>${itemRows(items)}</tbody></table>
 <div class="btns" style="margin-top:10px"><button type="button" class="ghost small" data-additem>${icon('plus')}Add item</button><span class="muted">To remove an item, clear its name.</span></div>`;
 const readItems = b => {
@@ -143,7 +144,7 @@ const newOrderForm = (v = {}) => `<a class="back" href="/orders">${icon('back')}
 <div><label for="ct">Phone or Instagram <span class="hint">(optional)</span></label><input id="ct" name="contact" value="${esc(v.contact)}" autocomplete="off"></div>
 <div><label for="d">Due date</label><input id="d" type="date" name="due_date" required value="${esc(v.due_date || core.today())}"></div></div>
 <label for="n">Notes <span class="hint">(optional)</span></label><input id="n" name="notes" value="${esc(v.notes)}" placeholder="Eggless, message on cake…">
-<h2 style="margin-top:28px">Items</h2>${itemsTable(v.items?.length ? v.items.map(i => ({ ...i, unit_paise: core.toPaise(i.unit_price || 0) })) : [])}
+<h2 style="margin-top:28px">Items</h2>${itemsTable(v.items?.length ? v.items.map(i => ({ ...i, unit_paise: i.unit_price === '' || i.unit_price == null ? null : core.toPaise(i.unit_price) })) : [])}
 <div class="formfoot"><button>Save order</button><a class="btn ghost" href="/orders">Cancel</a></div></form>`;
 app.get('/orders/new', authed, allow('add_order'), (req, res) => res.send(page('New order', newOrderForm(), { user: req.user, nav: 'orders' })));
 app.post('/orders/new', authed, allow('add_order'), h(async (req, res) => {

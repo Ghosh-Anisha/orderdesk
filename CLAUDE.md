@@ -5,11 +5,12 @@ Back office for home bakers who take orders in DMs and get paid on a personal UP
 ## Layout
 - `server.js`: all web routes, customer page, cron, MCP mount. Exports the Express app (Vercel runs it as one function).
 - `lib/core.js`: all order and payment logic. `lib/mcp.js`: the Claude tools (orders, payments, recipes, expenses, profit, make list). `lib/access.js`: team permissions and Claude sign-in (OAuth). `lib/db.js`: Postgres + auto-created tables. `lib/ui.js`: shared HTML shell and CSS.
-- `npm test` runs `test/e2e.mjs` with a real MCP client. Keep it green. Start with `DATABASE_URL=... npm start`, then `BASE=http://localhost:3000 npm test`.
+- `npm test` runs `test/e2e.mjs` with a real MCP client. Keep it green. Start with `DATABASE_URL=... npm start`, then `DATABASE_URL=... BASE=http://localhost:3000 npm test` (DATABASE_URL lets the test plant old-style data for the migration check; without it that part is skipped).
 
 ## Rules to keep
 - Totals, balances, payment status, recipe costs and margins are computed, never stored.
-- An item with no matching recipe is "cost unknown", never zero.
+- Costing goes through product_id. An item with no product or no recipe is "cost unknown", never zero.
+- Order items keep the price they were sold at; catalogue changes never alter old orders.
 - Customer-reported payments do not count until the seller confirms.
 - Same UPI reference cannot be recorded twice per business.
 - Every query filters by business id. Tool errors are plain English.

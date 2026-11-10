@@ -46,7 +46,7 @@ const reuse = await fetch(At.token_endpoint, form({ grant_type: 'authorization_c
 assert.equal(reuse.status, 400); ok('sign-in code works only once');
 const { c, call } = await connect(At.access_token);
 const tools = (await c.listTools()).tools.map(t => t.name).sort();
-assert.deepEqual(tools, ['add_expense', 'add_order', 'import_orders', 'list_orders', 'make_list', 'profit_summary', 'record_payment', 'save_recipe', 'update_order']); ok('connects over MCP, owner sees all 9 tools');
+assert.deepEqual(tools, ['add_expense', 'add_order', 'import_orders', 'list_orders', 'list_products', 'make_list', 'profit_summary', 'record_payment', 'remove_expense', 'remove_recipe', 'save_products', 'save_recipe', 'update_order']); ok('connects over MCP, owner sees all 13 tools');
 
 let r = await call('list_orders', {}); assert.match(r.t, /No orders/); ok('empty business says so plainly');
 r = await call('add_order', { customer: 'Priya', due_date: '2026-11-14', items: [{ name: 'Brownie box of 6', qty: 2, unit_price: 620 }], contact: '@priya' });
@@ -93,16 +93,19 @@ const meera = await mk('Meera', '2027-03-05', [{ name: 'Brownie box of 6', qty: 
 const kabir = await mk('Kabir', '2027-03-12', [{ name: 'cupcakes', qty: 12, unit_price: 90 }, { name: 'Gift card', qty: 1, unit_price: 200 }]);
 const zoya = await mk('Zoya', '2027-03-20', [{ name: 'Brownie box of 6', qty: 1, unit_price: 620 }]);
 await call('update_order', { order: zoya.order, state: 'cancelled' });
-r = await call('save_recipe', { name: 'Brownie box of 6', yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100 }] });
+r = await call('save_recipe', { product: 'Brownie box of 6', yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100 }] });
+assert.ok(r.err && /not in your products/.test(r.t) && /sells for/.test(r.t)); ok('recipe for a product not in the catalogue → asks for its price first');
+r = await call('save_recipe', { product: 'Brownie box of 6', price: 620, yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100 }] });
 assert.ok(r.err && /new ingredient/.test(r.t) && /unit \(g, ml or piece\), pack size, pack price/.test(r.t)); ok('new ingredient without pack details → asks for them, saves nothing');
-r = await call('save_recipe', { name: 'Brownie box of 6', yield_qty: 1, packaging_cost: 18, lines: [
+r = await call('list_products', {}); assert.match(r.t, /No products yet/); ok('failed recipe save added no product either');
+r = await call('save_recipe', { product: 'Brownie box of 6', price: 620, yield_qty: 1, packaging_cost: 18, lines: [
   { ingredient: 'Flour', qty: 100, unit: 'g', pack_size: 1000, pack_price: 60 }, { ingredient: 'Butter', qty: 100, unit: 'g', pack_size: 500, pack_price: 250 },
   { ingredient: 'Cocoa', qty: 20, unit: 'g', pack_size: 100, pack_price: 100 }, { ingredient: 'Eggs', qty: 2, unit: 'piece', pack_size: 6, pack_price: 48 }] });
 assert.equal(r.j.batch_cost, 92); assert.equal(r.j.cost_per_item, 110); ok('recipe cost: (6+50+20+16)/1 + ₹18 packaging = ₹110 a box');
-r = await call('save_recipe', { name: 'Cupcakes', yield_qty: 12, packaging_cost: 3, lines: [{ ingredient: 'flour', qty: 200 }, { ingredient: 'Butter', qty: 120 }, { ingredient: 'Eggs', qty: 3 },
+r = await call('save_recipe', { product: 'Cupcakes', price: 90, yield_qty: 12, packaging_cost: 3, lines: [{ ingredient: 'flour', qty: 200 }, { ingredient: 'Butter', qty: 120 }, { ingredient: 'Eggs', qty: 3 },
   { ingredient: 'Cream', qty: 120, unit: 'ml', pack_size: 200, pack_price: 80, use_within_days_after_opening: 3 }] });
 assert.equal(r.j.batch_cost, 144); assert.equal(r.j.cost_per_item, 15); ok('ingredients reused by name; ₹144/12 + ₹3 = ₹15 a cupcake');
-r = await call('save_recipe', { name: 'Cupcakes', yield_qty: 12, lines: [{ ingredient: 'Butter', qty: 120, unit: 'ml' }] });
+r = await call('save_recipe', { product: 'Cupcakes', yield_qty: 12, lines: [{ ingredient: 'Butter', qty: 120, unit: 'ml' }] });
 assert.ok(r.err && /measured in g/.test(r.t)); ok('unit mismatch refused in plain English');
 r = await call('add_expense', { month: '2027-03', category: 'rent share', amount: 204, is_estimate: true });
 assert.ok(r.err && /how it was worked out/.test(r.t)); ok('estimate without a note is refused');
@@ -132,9 +135,48 @@ ok('make list: flour 400 g, butter 320 g, cocoa 40 g, 7 eggs (2 packs), cream 12
 await mk('Ira', '2027-03-20', [{ name: 'Cupcakes', qty: 6, unit_price: 90 }]);
 r = await call('make_list', { due_from: '2027-03-01', due_to: '2027-03-31' });
 assert.equal(need('Cream').need, 180); assert.match(need('Cream').warning, /more than 3 days apart/); ok('cream needed 8 days apart → warns an opened pack will not last');
-r = await call('save_recipe', { name: 'Brownie box of 6', yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100, pack_price: 120 }, { ingredient: 'Butter', qty: 100 }, { ingredient: 'Cocoa', qty: 20 }, { ingredient: 'Eggs', qty: 2 }] });
-assert.equal(r.j.cost_per_item, 116); r = await call('save_recipe', { name: 'Cupcakes', yield_qty: 12, lines: [{ ingredient: 'Flour', qty: 200 }, { ingredient: 'Butter', qty: 120 }, { ingredient: 'Eggs', qty: 3 }, { ingredient: 'Cream', qty: 120 }] });
+r = await call('save_recipe', { product: 'Brownie box of 6', yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100, pack_price: 120 }, { ingredient: 'Butter', qty: 100 }, { ingredient: 'Cocoa', qty: 20 }, { ingredient: 'Eggs', qty: 2 }] });
+assert.equal(r.j.cost_per_item, 116); r = await call('save_recipe', { product: 'Cupcakes', yield_qty: 12, lines: [{ ingredient: 'Flour', qty: 200 }, { ingredient: 'Butter', qty: 120 }, { ingredient: 'Eggs', qty: 3 }, { ingredient: 'Cream', qty: 120 }] });
 assert.equal(r.j.cost_per_item, 16); ok('new flour price flows into every recipe (costs are computed, not stored); packaging kept');
+
+// ---- product catalogue: prices fill in, explicit prices win, old orders keep their price
+r = await call('save_products', { products: [{ name: 'Banana bread', price: 380 }, { name: 'Lemon tart', price: 150 }, { name: 'banana bread', price: 1 }, { name: 'Mystery box' }, { name: 'cupcakes', price: 95 }] });
+assert.deepEqual([r.j.created.length, r.j.updated.length, r.j.errors.length], [2, 1, 2]); assert.match(r.j.errors.find(e => e.name === 'Mystery box').problem, /new product and has no price/);
+assert.match(r.j.errors.find(e => e.row === 3).problem, /already in row 1/); assert.equal(r.j.updated[0].old_price, 90); ok('bulk save: 2 created, cupcakes repriced, duplicate and price-less rows reported in plain English');
+r = await call('list_products', {}); const prod = n => r.j.find(p => p.name === n);
+assert.equal(prod('Cupcakes').price, 95); assert.equal(prod('Cupcakes').cost_per_item, 16); assert.equal(prod('Banana bread').cost_per_item, 'cost unknown'); ok('list_products shows prices, and cost unknown where there is no recipe');
+const bb = await mk('Nisha', '2027-04-02', [{ name: 'banana BREAD', qty: 2 }]);
+assert.equal(bb.total, 760); assert.equal(bb.items[0].name, 'Banana bread'); assert.equal(bb.items[0].unit_price, 380); ok('price lookup: "banana BREAD" × 2 → catalogue ₹380 each, catalogue name used');
+r = await call('add_order', { customer: 'Om', due_date: '2027-04-02', items: [{ name: 'Lemon tart', qty: 1, unit_price: 120 }, { name: 'Cupcakes', qty: 2 }] });
+assert.equal(r.j.total, 310); ok('explicit price wins (₹120 tart) next to a catalogue price (₹95 cupcakes)');
+r = await call('add_order', { customer: 'Pia', due_date: '2027-04-02', items: [{ name: 'Mango cheesecake', qty: 1 }] });
+assert.ok(r.err && /"Mango cheesecake" is not in your products/.test(r.t) && /Ask the seller for the price/.test(r.t)); ok('unknown item with no price → plain error telling Claude to ask or add the product');
+await call('save_products', { products: [{ name: 'Lemon tart', active: false }] });
+r = await call('add_order', { customer: 'Pia', due_date: '2027-04-02', items: [{ name: 'Lemon tart', qty: 1 }] }); assert.ok(r.err && /switched off/.test(r.t)); ok('switched-off product does not supply a price');
+await call('save_products', { products: [{ name: 'Banana bread', price: 420 }] });
+r = await call('list_orders', { customer: 'Nisha' }); assert.equal(r.j[0].total, 760); assert.equal(r.j[0].items[0].unit_price, 380); ok('price snapshot: catalogue change to ₹420 leaves the old order at ₹380');
+r = await call('add_order', { customer: 'Nisha', due_date: '2027-04-09', items: [{ name: 'Banana bread', qty: 1 }] }); assert.equal(r.j.total, 420); ok('new orders use the new price');
+r = await call('update_order', { order: bb.order, items: [{ name: 'Banana bread', qty: 3, unit_price: 380 }] }); assert.equal(r.j.total, 1140); ok("update_order keeps a price that is sent");
+r = await call('update_order', { order: bb.order, items: [{ name: 'Banana bread', qty: 1 }, { name: 'Gift card', qty: 1, unit_price: 200 }] }); assert.equal(r.j.total, 620); ok('update_order fills a missing price from the catalogue');
+r = await call('import_orders', { orders: [{ customer: 'Ria', due_date: '2027-04-15', items: [{ name: 'Cupcakes', qty: 6 }] }, { customer: 'Sam', due_date: '2027-04-15', items: [{ name: 'Unknown pie', qty: 1 }] }] });
+assert.equal(r.j.created.length, 1); assert.match(r.j.errors[0].problem, /not in your products/); ok('import_orders fills catalogue prices and reports unknown items per row');
+let wr = await fetch(B + '/orders/new', form([['customer', 'Web'], ['due_date', '2027-04-20'], ['iname', 'banana bread'], ['iqty', '2'], ['iprice', '']], A.cookie));
+assert.equal(wr.status, 302); r = await call('list_orders', { customer: 'Web' }); assert.equal(r.j[0].total, 840); ok('web order form: empty price is filled from the catalogue');
+wr = await fetch(B + '/orders/new', form([['customer', 'Web2'], ['due_date', '2027-04-20'], ['iname', 'Plum cake'], ['iqty', '1'], ['iprice', '']], A.cookie));
+assert.equal(wr.status, 400); assert.match(await wr.text(), /&quot;Plum cake&quot; is not in your products/); ok('web order form: unknown item without price shows the plain error');
+r = await call('profit_summary', { month: '2027-04' }); const apr = n => r.j.margin_by_item.find(i => i.item === n);
+assert.equal(apr('Banana bread').cost, 'cost unknown'); assert.equal(apr('Banana bread').why, 'no recipe for this product'); assert.equal(apr('Gift card').why, 'not in the product catalogue');
+assert.equal(apr('Cupcakes').cost, 128); ok('costing goes through product_id: cupcakes costed (8 × ₹16), banana bread has no recipe, gift card is not a product');
+
+// ---- expenses replace, remove_expense, remove_recipe
+r = await call('add_expense', { month: '2027-03', category: 'Gas', amount: 350, note: 'new cylinder' });
+assert.equal(r.j.replaced_previous, true); assert.equal(r.j.month_expenses_total, 554); assert.equal(r.j.month_expense_count, 2); ok('same month and category replaces (₹300 → ₹350), never doubles');
+r = await call('remove_expense', { month: '2027-03', category: 'GAS' }); assert.match(r.t, /Removed gas \(₹350\)/i);
+r = await call('remove_expense', { month: '2027-03', category: 'gas' }); assert.ok(r.err && /There is no "gas" expense in 2027-03/.test(r.t)); ok('remove_expense removes once, then says plainly there is nothing to remove');
+r = await call('remove_recipe', { product: 'cupcakes' }); assert.match(r.t, /Removed the recipe for Cupcakes/);
+r = await call('remove_recipe', { product: 'Cupcakes' }); assert.ok(r.err && /has no recipe/.test(r.t));
+r = await call('remove_recipe', { product: 'Croissant' }); assert.ok(r.err && /no product called "Croissant"/.test(r.t)); ok('remove_recipe: removed once, then plain errors');
+r = await call('profit_summary', { month: '2027-03' }); assert.equal(r.j.margin_by_item.find(i => i.item === 'Cupcakes').cost, 'cost unknown'); assert.equal(r.j.overhead, 204); ok('after removal cupcakes are cost unknown (not zero) and overhead is ₹204');
 
 // isolation
 const z = await connect((await signIn(Z.cookie)).access_token);
@@ -142,8 +184,13 @@ r = await z.call('list_orders', {}); assert.match(r.t, /No orders/); ok('second 
 r = await z.call('update_order', { order: 1, state: 'cancelled' }); assert.ok(r.err); ok('second business cannot touch order #1');
 r = await z.call('profit_summary', { month: '2027-03' }); assert.match(r.t, /No orders due/); ok('second business sees none of the first business\'s profit');
 r = await z.call('make_list', { due_from: '2027-03-01', due_to: '2027-03-31' }); assert.match(r.t, /No open orders/); ok('second business gets an empty make list');
-r = await z.call('save_recipe', { name: 'Brownie box of 6', yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100 }] }); assert.ok(r.err && /new ingredient/.test(r.t)); ok('first business\'s ingredients are invisible to the second');
-await z.call('save_recipe', { name: 'Brownie box of 6', yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100, unit: 'g', pack_size: 1000, pack_price: 999 }] });
+r = await z.call('list_products', {}); assert.match(r.t, /No products yet/); ok('second business sees none of the first business\'s products');
+r = await z.call('add_order', { customer: 'X', due_date: '2027-04-02', items: [{ name: 'Banana bread', qty: 1 }] }); assert.ok(r.err && /not in your products/.test(r.t)); ok('first business\'s prices are never used for the second');
+r = await z.call('save_recipe', { product: 'Brownie box of 6', yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100 }] }); assert.ok(r.err && /not in your products/.test(r.t));
+r = await z.call('save_recipe', { product: 'Brownie box of 6', price: 500, yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100 }] }); assert.ok(r.err && /new ingredient/.test(r.t)); ok('first business\'s ingredients are invisible to the second');
+await z.call('save_recipe', { product: 'Brownie box of 6', price: 500, yield_qty: 1, lines: [{ ingredient: 'Flour', qty: 100, unit: 'g', pack_size: 1000, pack_price: 999 }] });
+r = await z.call('remove_expense', { month: '2027-03', category: 'rent share' }); assert.ok(r.err); ok('second business cannot remove the first business\'s expenses');
+r = await z.call('remove_recipe', { product: 'Brownie box of 6' }); assert.match(r.t, /Removed/);
 r = await call('profit_summary', { month: '2027-03' }); assert.equal(r.j.margin_by_item.find(i => i.item === 'Brownie box of 6').cost_per_item, 116); ok('second business\'s same-named recipe does not change the first business\'s costs');
 const old = await fetch(B + '/mcp/not-a-real-token', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{}' }); assert.equal(old.status, 410); assert.match((await old.json()).error.message, /replaced by sign-in/); ok('old secret links are switched off with a plain message');
 assert.ok(await refused('made-up-token')); ok('made-up token refused');
@@ -160,7 +207,7 @@ const H = { cookie: jr.headers.get('set-cookie').split(';')[0] }; ok('helper joi
 assert.equal((await fetch(join)).status, 404); ok('invite link works only once');
 const Ht = await signIn(H.cookie); assert.ok(Ht.consent.includes('Not allowed for this email') && Ht.consent.includes('Record and confirm payments')); ok('helper consent screen lists what is not allowed');
 const hc = await connect(Ht.access_token);
-assert.deepEqual((await hc.c.listTools()).tools.map(t => t.name).sort(), ['add_order', 'list_orders']); ok('helper\'s Claude only lists the tools they may use');
+assert.deepEqual((await hc.c.listTools()).tools.map(t => t.name).sort(), ['add_order', 'list_orders', 'list_products']); ok('helper\'s Claude only lists the tools they may use');
 r = await hc.call('list_orders', {}); assert.ok(r.j.length >= 1); ok('helper sees the owner\'s orders through Claude');
 r = await hc.call('add_order', { customer: 'Dev', due_date: '2026-12-01', items: [{ name: 'Cookie tin', qty: 1, unit_price: 450 }] }); assert.ok(!r.err); ok('helper can add an order');
 r = await hc.call('record_payment', { order: 1, amount: 10, upi_ref: 'HELPER123' }); assert.ok(r.err && /not allowed to use "Record and confirm payments"/.test(r.t)); ok('helper cannot record payments (plain-English refusal)');
@@ -178,5 +225,33 @@ await fetch(B + `/team/members/${mid}/remove`, form({}, A.cookie));
 assert.ok(await refused(Hr.access_token)); ok('removed helper\'s Claude connection stops working');
 html = await (await fetch(B + '/orders/1', { headers: { cookie: Z.cookie }, redirect: 'manual' })).text(); assert.ok(!html.includes('Priya') ); ok('web: other business cannot open order #1');
 assert.equal((await fetch(B + '/orders', { redirect: 'manual' })).status, 302); ok('web: logged-out visitors go to login');
+
+// ---- migration: existing recipes and order items move onto products (needs DATABASE_URL to plant old-style data)
+if (process.env.DATABASE_URL) {
+  const pg = (await import('pg')).default; const db = new pg.Client({ connectionString: process.env.DATABASE_URL }); await db.connect();
+  const L = await signup('Legacy'); // no signed-in request yet, so the business has not been migrated
+  const lb = (await db.query('SELECT business_id FROM users WHERE email=$1', [`legacy${run}@t.com`])).rows[0].business_id;
+  const order = async (n, created, items) => { const id = (await db.query("INSERT INTO orders (business_id,number,customer,due_date,public_token,created_at) VALUES ($1,$2,$3,'2027-05-10',$4,$5) RETURNING id", [lb, n, 'Old ' + n, `legacy${run}x${n}`, created])).rows[0].id;
+    for (const [name, qty, p] of items) await db.query('INSERT INTO order_items (order_id,name,qty,unit_paise) VALUES ($1,$2,$3,$4)', [id, name, qty, p]); };
+  await order(1, '2026-01-01', [['Banana bread', 1, 35000], ['Tea cake', 2, 30000]]);
+  await order(2, '2026-02-01', [['banana bread ', 1, 38000]]);
+  const ing = (await db.query("INSERT INTO ingredients (business_id,name,unit,pack_size,pack_price_paise) VALUES ($1,'Flour','g',1000,6000) RETURNING id", [lb])).rows[0].id;
+  for (const [name, pack] of [['Banana Bread', 1000], ['Lemon tart', 0]]) {
+    const rid = (await db.query('INSERT INTO recipes (business_id,name,yield_qty,packaging_paise) VALUES ($1,$2,1,$3) RETURNING id', [lb, name, pack])).rows[0].id;
+    await db.query('INSERT INTO recipe_lines (business_id,recipe_id,ingredient_id,qty) VALUES ($1,$2,$3,500)', [lb, rid, ing]);
+  }
+  const lc = await connect((await signIn(L.cookie)).access_token); // first signed-in use runs the migration
+  r = await lc.call('list_products', {}); const lp = n => r.j.find(p => p.name.toLowerCase() === n);
+  assert.equal(r.j.length, 3); assert.equal(lp('banana bread').price, 380); assert.equal(lp('tea cake').price, 300); assert.equal(lp('lemon tart').price, 'no price yet');
+  ok('migration: a product per distinct item (latest sold price, ₹380 not ₹350) and per recipe (no price yet)');
+  assert.equal(lp('banana bread').cost_per_item, 40); assert.equal(lp('tea cake').cost_per_item, 'cost unknown'); ok('migration: recipes linked to their products by name, case ignored');
+  assert.equal((await db.query('SELECT count(*)::int n FROM order_items i JOIN orders o ON o.id=i.order_id WHERE o.business_id=$1 AND i.product_id IS NULL', [lb])).rows[0].n, 0);
+  assert.equal((await db.query('SELECT count(*)::int n FROM recipes WHERE business_id=$1 AND product_id IS NULL', [lb])).rows[0].n, 0); ok('migration: every old order item and recipe now has a product_id');
+  r = await lc.call('profit_summary', { month: '2027-05' }); const mi = n => r.j.margin_by_item.find(i => i.item.toLowerCase() === n);
+  assert.equal(r.j.revenue, 1330); assert.equal(mi('banana bread').cost, 80); assert.equal(mi('tea cake').cost, 'cost unknown'); ok('migrated orders are costed through their products; old prices unchanged (₹1,330)');
+  r = await lc.call('add_order', { customer: 'New', due_date: '2027-05-11', items: [{ name: 'Lemon tart', qty: 1 }] }); assert.ok(r.err && /has no price in your products yet/.test(r.t)); ok('a migrated recipe with no price asks for one');
+  r = await call('list_products', {}); assert.ok(!r.j.some(p => p.name === 'Tea cake')); ok('migration stays inside its own business');
+  await db.end();
+} else console.log('  - migration test skipped: set DATABASE_URL to run it');
 console.log('\nALL PASSED');
 process.exit(0);
